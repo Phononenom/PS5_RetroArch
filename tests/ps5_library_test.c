@@ -298,6 +298,9 @@ int main(int argc, char **argv)
     }
     core(dir, "dosbox_pure", "DOS", "zip|dosz|exe|com|bat|iso|cue");
     core(dir, "scummvm", "ScummVM", "scummvm");
+    /* a cartridge system whose core also runs a disc system (Sega CD) */
+    core(dir, "genesis_plus_gx", "Sega - Mega Drive - Genesis|Sega - Mega-CD - Sega CD",
+         "md|bin|cue|chd");
     const char *content_folders[] = {"content",
                                      "content/ATARI 2600",
                                      "content/ATARI 2600/Hacks",
@@ -310,6 +313,8 @@ int main(int argc, char **argv)
                                      "content/ScummVM/Mansion/game",
                                      "content/My Stuff",
                                      "content/Saturn",
+                                     "content/megadrive",
+                                     "content/psx",
                                      "usb",
                                      "usb/Atari 2600"};
     for (size_t i = 0; i < sizeof(content_folders) / sizeof(content_folders[0]); i++)
@@ -336,6 +341,8 @@ int main(int argc, char **argv)
                                    "content/Saturn/game.cue",
                                    "usb/Atari 2600/River Run.a26",
                                    "content/3DO/Archived Disc.7z",
+                                   "content/megadrive/Racer.7z",
+                                   "content/psx/Archived Disc.7z",
                                    "usb/loose.a26"};
     for (size_t i = 0; i < sizeof(content_files) / sizeof(content_files[0]); i++)
     {
@@ -348,12 +355,16 @@ int main(int argc, char **argv)
     const char *const roots[] = {content_root, usb_root, NULL};
     assert(ps5_library_load_content(&library, playlists, info, cores, roots) == 0);
     /* The playlists' nine, and: Quest, Jungle Jump, River Run (the drive), the 3DO game's
-     * .cue, SHOOTER.EXE, Platform.zip and Mansion (Quest.zip though Stella takes no .zip: a
-     * cartridge system's archives are RetroArch's to open). Not: the 3DO's archived disc
-     * (a disc system's archive), readme.txt, the firmware (by the info's
+     * .cue, SHOOTER.EXE, Platform.zip, Mansion and Racer.7z (Quest.zip though Stella takes no
+     * .zip: a cartridge system's archives are RetroArch's to open, and Racer.7z though its core
+     * also runs Sega CD discs). Not: the 3DO's and PlayStation's archived discs (a disc
+     * system's archives), readme.txt, the firmware (by the info's
      * names, a variant of one, [BIOS]), the .iso behind the .cue, SETUP.EXE, SHOOTER.WAD,
      * dosbox.conf, My Stuff (no platform), Saturn (no core), a file at a drive's top. */
-    assert(library.game_count == 9 + 7);
+    assert(library.game_count == 9 + 8);
+    const struct ps5_library_system *megadrive = system_of(&library, "genesis");
+    assert(megadrive && megadrive->game_count == 1 &&
+           strstr(library.games[megadrive->first_game].path, "megadrive/Racer.7z"));
     const struct ps5_library_system *atari = system_of(&library, "atari2600");
     assert(atari && atari->game_count == 3 && strcmp(atari->folder, "/") != 0);
     const struct ps5_library_system *panasonic = system_of(&library, "3do");

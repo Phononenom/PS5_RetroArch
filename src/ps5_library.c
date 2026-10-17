@@ -1364,8 +1364,10 @@ static void scan_root(struct loading *loading, const char *root, const char *fir
             continue; /* no core for it */
         /* RetroArch opens a .zip or .7z itself for a core that does not take one, so a
          * cartridge system's archives are games. A disc system's are not: an archived
-         * disc is a .cue and its tracks, and RetroArch extracts only the file it loads. */
-        if (!list_has(scanning.extensions, "cue") && !list_has(scanning.extensions, "chd"))
+         * disc is a .cue and its tracks, and RetroArch extracts only the file it loads.
+         * Which one a system is goes by the system, not by its core: Genesis Plus GX also
+         * takes Sega CD's .cue, and the Mega Drive's archives are still games. */
+        if (!list_has("psx|ps2|psp|saturn|dreamcast|segacd|pcfx|3do|neogeocd|gc|wii", platform))
             add_extensions(scanning.extensions, sizeof(scanning.extensions), "zip|7z");
         char path[PS5_LIBRARY_PATH_MAX];
         if (!joined(path, sizeof(path), root, listing.names[i]))
