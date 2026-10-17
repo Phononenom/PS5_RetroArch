@@ -42,6 +42,16 @@ static void core(const char *dir, const char *name, const char *database, const 
     write_text(path, text);
 }
 
+/* A file's text, at most size - 1 bytes of it. */
+static const char *read_back(const char *path, char *out, size_t size)
+{
+    FILE *file = fopen(path, "rb");
+    assert(file);
+    out[fread(out, 1, size - 1, file)] = '\0';
+    fclose(file);
+    return out;
+}
+
 static const struct ps5_library_system *system_of(const struct ps5_library *library, const char *id)
 {
     for (size_t i = 0; i < library->system_count; i++)
@@ -368,8 +378,8 @@ int main(int argc, char **argv)
     assert(system_of(&library, "snes")->game_count == 2);
     ps5_library_free(&library);
 
-    /* A folder for each system the installed cores run, named as RetroArch names it; a
-     * system with a folder already (any name) gets none, and nothing is renamed. */
+    /* A folder for each system the installed cores run, named as ES-DE names it; a system
+     * with a folder already (any name) gets none. */
     {
         char root[1024], content[1100], info[1100], cores[1100], path[2048];
         snprintf(root, sizeof(root), "%s/folders", dir);
@@ -400,12 +410,8 @@ int main(int argc, char **argv)
         snprintf(path, sizeof(path), "%s/stella_libretro.info", info);
         write_text(path, "database = \"Atari - 2600\"\n"); /* no core beside it: not installed */
         assert(ps5_library_make_system_folders(content, info, cores) == 10);
-        const char *expected[] = {
-            "Sega - Game Gear",         "Sega - Master System - Mark III",
-            "Sega - Mega-CD - Sega CD", "Sega - Mega Drive - Genesis",
-            "Sega - SG-1000",           "Nintendo - Super Nintendo Entertainment System",
-            "Nintendo - GameCube",      "Nintendo - Wii",
-            "Commodore - Amiga",        "FBNeo - Arcade Games"};
+        const char *expected[] = {"gamegear", "mastersystem", "segacd", "genesis", "sg-1000",
+                                  "snes",     "gc",           "wii",    "amiga",   "fbneo"};
         for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++)
         {
             struct stat st;
@@ -414,10 +420,16 @@ int main(int argc, char **argv)
             /* Each one is its system's to every frontend. */
             assert(ps5_library_platform(expected[i]));
         }
-        const char *absent[] = {"Sony - PlayStation",      "Nintendo - Sufami Turbo",
-                                "Nintendo - Satellaview",  "Sega - PICO",
-                                "Commodore - CD32",        "Atari - 2600",
-                                "Nintendo - Wii (Digital)"};
+        const char *absent[] = {"Sony - PlayStation",
+                                "psx",
+                                "Nintendo - Sufami Turbo",
+                                "Nintendo - Satellaview",
+                                "Sega - PICO",
+                                "Commodore - CD32",
+                                "Atari - 2600",
+                                "atari2600",
+                                "Nintendo - Wii (Digital)",
+                                "Sega - Mega Drive - Genesis"};
         for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++)
         {
             struct stat st;
@@ -425,10 +437,130 @@ int main(int argc, char **argv)
             assert(stat(path, &st) != 0);
         }
         assert(ps5_library_make_system_folders(content, info, cores) == 0); /* once */
+        /* An install copied without its empty folders: content is made too */
         snprintf(path, sizeof(path), "%s/missing", root);
+        assert(ps5_library_make_system_folders(path, info, cores) == 11);
+        snprintf(path, sizeof(path), "%s/missing/psx", root);
+        assert(stat(path, &(struct stat){0}) == 0);
+        snprintf(path, sizeof(path), "%s/no/such/content", root);
         assert(ps5_library_make_system_folders(path, info, cores) == -1);
     }
+    /* Folders earlier builds named as RetroArch does, renamed as ES-DE names them, with the
+     * playlists' paths and the per-folder settings that name them. */
+    {
+        char root[1024], content[1100], playlists[1100], config[1100], path[2048], text[4096],
+            want[2048];
+        snprintf(root, sizeof(root), "%s/renamed", dir);
+        snprintf(content, sizeof(content), "%s/content", root);
+        snprintf(playlists, sizeof(playlists), "%s/playlists", root);
+        snprintf(config, sizeof(config), "%s/config", root);
+        const char *folders[] = {"",
+                                 "/content",
+                                 "/content/Sony - PlayStation 2",
+                                 "/content/Nintendo - Game Boy",
+                                 "/content/gb",
+                                 "/content/Nintendo - Game Boy Advance",
+                                 "/content/gba",
+                                 "/content/MAME",
+                                 "/content/PS1",
+                                 "/playlists",
+                                 "/playlists/builtin",
+                                 "/config",
+                                 "/config/PS5SX2",
+                                 "/config/MAME",
+                                 "/config/remaps",
+                                 "/config/remaps/PS5SX2"};
+        for (size_t i = 0; i < sizeof(folders) / sizeof(folders[0]); i++)
+        {
+            snprintf(path, sizeof(path), "%s%s", root, folders[i]);
+            assert(mkdir(path, 0755) == 0);
+        }
+        const char *files[] = {"content/Sony - PlayStation 2/Disc.iso",
+                               "content/Nintendo - Game Boy/One.gb",
+                               "content/gb/Two.gb",
+                               "content/Nintendo - Game Boy Advance/Same.gba",
+                               "content/gba/Same.gba",
+                               "content/MAME/game.zip",
+                               "content/PS1/Disc.cue",
+                               "config/PS5SX2/Sony - PlayStation 2.cfg",
+                               "config/PS5SX2/Sony - PlayStation 2.opt",
+                               "config/remaps/PS5SX2/Sony - PlayStation 2.rmp",
+                               "config/MAME/MAME.cfg",
+                               "config/MAME/MAME.slangp"};
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+        {
+            snprintf(path, sizeof(path), "%s/%s", root, files[i]);
+            write_text(path, "x");
+        }
+        snprintf(path, sizeof(path), "%s/Sony - PlayStation 2.lpl", playlists);
+        snprintf(text, sizeof(text),
+                 "{\"scan_content_dir\": \"%s/Sony - PlayStation 2\", \"items\": [{\"path\": "
+                 "\"%s/Sony - PlayStation 2/Disc.iso\"}]}",
+                 content, content);
+        write_text(path, text);
+        snprintf(path, sizeof(path), "%s/Nintendo - Game Boy.lpl", playlists);
+        snprintf(text, sizeof(text),
+                 "{\"items\": [{\"path\": \"%s/Nintendo - Game Boy/One.gb\"}, {\"path\": "
+                 "\"%s/Nintendo - Game Boy Advance/Same.gba\"}]}",
+                 content, content);
+        write_text(path, text);
+        snprintf(path, sizeof(path), "%s/builtin/content_history.lpl", playlists);
+        snprintf(text, sizeof(text), "{\"items\": [{\"path\": \"%s/MAME/game.zip#game.bin\"}]}",
+                 content);
+        write_text(path, text);
+
+        /* Renamed (ps2, mame), merged (gb), left where a name is taken (gba's), and a
+         * folder that is not a name of RetroArch's untouched (PS1). */
+        assert(ps5_library_rename_system_folders(content, playlists, config) == 3);
+        const char *there[] = {
+            "ps2/Disc.iso", "gb/One.gb",     "gb/Two.gb",   "Nintendo - Game Boy Advance/Same.gba",
+            "gba/Same.gba", "mame/game.zip", "PS1/Disc.cue"};
+        for (size_t i = 0; i < sizeof(there) / sizeof(there[0]); i++)
+        {
+            snprintf(path, sizeof(path), "%s/%s", content, there[i]);
+            assert(stat(path, &(struct stat){0}) == 0);
+        }
+        const char *gone[] = {"Sony - PlayStation 2", "Nintendo - Game Boy", "MAME"};
+        for (size_t i = 0; i < sizeof(gone) / sizeof(gone[0]); i++)
+        {
+            snprintf(path, sizeof(path), "%s/%s", content, gone[i]);
+            assert(stat(path, &(struct stat){0}) != 0);
+        }
+        /* The playlists follow; a folder whose name only begins the same is left. */
+        snprintf(path, sizeof(path), "%s/Sony - PlayStation 2.lpl", playlists);
+        read_back(path, text, sizeof(text));
+        snprintf(want, sizeof(want), "\"scan_content_dir\": \"%s/ps2\"", content);
+        assert(strstr(text, want));
+        snprintf(want, sizeof(want), "\"%s/ps2/Disc.iso\"", content);
+        assert(strstr(text, want) && !strstr(text, "PlayStation 2/"));
+        snprintf(path, sizeof(path), "%s/Nintendo - Game Boy.lpl", playlists);
+        read_back(path, text, sizeof(text));
+        snprintf(want, sizeof(want), "\"%s/gb/One.gb\"", content);
+        assert(strstr(text, want));
+        snprintf(want, sizeof(want), "\"%s/Nintendo - Game Boy Advance/Same.gba\"", content);
+        assert(strstr(text, want));
+        snprintf(path, sizeof(path), "%s/builtin/content_history.lpl", playlists);
+        read_back(path, text, sizeof(text));
+        snprintf(want, sizeof(want), "\"%s/mame/game.zip#game.bin\"", content);
+        assert(strstr(text, want));
+        /* The per-folder settings follow; a core named as the folder keeps its own. */
+        const char *settings[] = {"PS5SX2/ps2.cfg", "PS5SX2/ps2.opt", "remaps/PS5SX2/ps2.rmp",
+                                  "MAME/MAME.cfg", "MAME/MAME.slangp"};
+        for (size_t i = 0; i < sizeof(settings) / sizeof(settings[0]); i++)
+        {
+            snprintf(path, sizeof(path), "%s/%s", config, settings[i]);
+            assert(stat(path, &(struct stat){0}) == 0);
+        }
+        snprintf(path, sizeof(path), "%s/PS5SX2/Sony - PlayStation 2.cfg", config);
+        assert(stat(path, &(struct stat){0}) != 0);
+        snprintf(path, sizeof(path), "%s/MAME/mame.cfg", config);
+        assert(stat(path, &(struct stat){0}) != 0);
+        assert(ps5_library_rename_system_folders(content, playlists, config) == 0); /* once */
+        snprintf(path, sizeof(path), "%s/none", root);
+        assert(ps5_library_rename_system_folders(path, playlists, config) == -1);
+    }
     puts("ps5_library: platforms, playlists, systems, cores, folders, labels, favourites, history, "
-         "runtime logs, game mode commands, content folders and system folders PASS");
+         "runtime logs, game mode commands, content folders, system folders and their ES-DE "
+         "names PASS");
     return 0;
 }

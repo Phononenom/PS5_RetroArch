@@ -125,13 +125,24 @@ extern "C"
     /* A platform's RetroArch database name ("Sony - PlayStation"), or NULL. */
     const char *ps5_library_platform_database(const char *id);
 
-    /* A folder in content for each system the installed cores run, named as RetroArch
-     * names it ("Nintendo - Nintendo Entertainment System"), so games have a place to go
-     * and every frontend knows their system. A system the content folder already has a
-     * folder for, whatever its name ("PS1", "Genesis"), gets none: nothing is renamed or
-     * moved. A database no platform here stands for (Satellaview, CD32...) gets none.
+    /* A folder in content for each system the installed cores run, named as ES-DE names
+     * it ("nes", "ps2", "megadrive"... its system's id here), so games have a place to go
+     * and every frontend knows their system. content is made first when it is missing. A
+     * system the content folder already has a folder for, whatever its name ("PS1"), gets
+     * none. A database no platform here stands for (Satellaview, CD32...) gets none.
      * Returns how many folders it made, or -1 when content cannot be read. */
     int ps5_library_make_system_folders(const char *content, const char *info, const char *cores);
+    /* The folders earlier builds made under RetroArch's names ("Sony - PlayStation 2")
+     * renamed to ES-DE's ("ps2"), with what refers to them: the paths in the playlists
+     * (playlists and playlists/builtin) and the per-folder overrides, core options, shader
+     * presets and remaps under config (config/<core>, config/remaps/<core>). Where the
+     * ES-DE folder exists, the old folder's entries move into it when none of their names
+     * is taken there, and the old folder goes; otherwise it is left as it is (it is still
+     * its system's). A core folder named as the content folder keeps its files, which are
+     * that core's own. Returns how many folders it renamed or merged, or -1 when content
+     * cannot be read. */
+    int ps5_library_rename_system_folders(const char *content, const char *playlists,
+                                          const char *config);
 
     /* Game mode's launch command for a game (src/ps5_game.h): RetroArch's command line
      * with its system's core, shell-quoted. 0, or -1 when it does not fit. */

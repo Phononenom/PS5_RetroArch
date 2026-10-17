@@ -212,7 +212,7 @@ usually `/data/homebrew/PPSA99169/`.
 | Folder or file | Purpose |
 | --- | --- |
 | `content/` | Your content; available to WebUI uploads and downloads |
-| `content/Saturn/` | Saturn disc images; created automatically |
+| `content/<system>/` | A folder for each installed system, named as EmulationStation (ES-DE) names it: `psx`, `ps2`, `snes`, `saturn`; created automatically |
 | `system/` | General BIOS and system data |
 | `system/Saturn/` | Saturn BIOS files; created automatically |
 | `system/pcsx2/bios/` | PlayStation 2 BIOS (your own dump) |

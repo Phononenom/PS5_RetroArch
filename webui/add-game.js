@@ -34,7 +34,7 @@ function addDestination() {
   const system = addGame.systems.find(s => s.id === $('#add-system').value);
   $('#add-system-icon').replaceChildren(systemIcon(system?.id));
   $('#add-file').accept = system ? [...new Set(system.extensions.split('|'))].map(x => '.' + x).join(',') : '';
-  $('#add-destination').textContent = system && addGame.file ? 'Destination: /app0/content/' + system.name + '/' + addGame.file.name : 'Select the system this game belongs to.';
+  $('#add-destination').textContent = system && addGame.file ? 'Destination: /app0/content/' + system.id + '/' + addGame.file.name : 'Select the system this game belongs to.';
 }
 async function openAddGame() {
   if (addGame) return;

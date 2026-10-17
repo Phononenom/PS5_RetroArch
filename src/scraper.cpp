@@ -2977,7 +2977,7 @@ bool add_target(const std::string &system, const std::string &filename, std::str
         why = "This file type is not supported by the installed cores for this system.";
         return false;
     }
-    relative = selected->second.at("name") + '/' + filename;
+    relative = selected->first + '/' + filename; /* the system's folder is its ES-DE name */
     key = game_key("/app0/content/" + relative);
     for (const auto &game : load_games())
         if (game.system == system && game.key == key)

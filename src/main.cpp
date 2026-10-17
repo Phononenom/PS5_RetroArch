@@ -406,7 +406,13 @@ int main(int process_argc, char **process_argv)
      * screen the picker, which restarts the title as RetroArch or EmulationStation;
      * those two are their own executables, started through LoadExec. */
     /* A folder in content for each system the installed cores run, before any frontend:
-     * a launch from the home screen goes to the picker from here (issue 33). */
+     * a launch from the home screen goes to the picker from here (issue 33). Folders
+     * earlier builds named as RetroArch does are renamed as ES-DE names them first. */
+    const int renamed_folders =
+        ps5_library_rename_system_folders("/app0/content", "/app0/playlists", "/app0/config");
+    if (renamed_folders > 0)
+        ps5::debug::mark_value("startup: system folders renamed as ES-DE names them",
+                               renamed_folders);
     const int system_folders =
         ps5_library_make_system_folders("/app0/content", "/app0/info", "/app0/cores");
     if (system_folders > 0)

@@ -19,6 +19,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 /* --- the JSON RetroArch writes its playlists in ----------------------------------- */
 
@@ -1470,6 +1471,9 @@ int ps5_library_load_content_at(struct ps5_library *library, const char *playlis
 
 int ps5_library_make_system_folders(const char *content, const char *info, const char *cores)
 {
+    /* An install copied without its empty folders has no content folder at all */
+    if (mkdir(content, 0777) == 0)
+        chmod(content, 0777); /* FTP's reach: the title's folders are 0777 */
     /* The systems content already has a folder for (top level), by platform. */
     char **names = folder_names(content, "");
     if (!names)
@@ -1505,8 +1509,7 @@ int ps5_library_make_system_folders(const char *content, const char *info, const
             if (!platform || !platform->database || has[platform - platforms])
                 continue;
             char path[PS5_LIBRARY_PATH_MAX];
-            if (snprintf(path, sizeof(path), "%s/%s", content, platform->database) >=
-                (int)sizeof(path))
+            if (snprintf(path, sizeof(path), "%s/%s", content, platform->id) >= (int)sizeof(path))
                 continue;
             has[platform - platforms] = 1;
             const int created = mkdir(path, 0777) == 0;
@@ -1516,6 +1519,200 @@ int ps5_library_make_system_folders(const char *content, const char *info, const
         }
     ps5_library_free(&library);
     return made;
+}
+
+static int is_folder(const char *path)
+{
+    struct stat status;
+    return stat(path, &status) == 0 && S_ISDIR(status.st_mode);
+}
+
+static int is_there(const char *path)
+{
+    struct stat status;
+    return lstat(path, &status) == 0;
+}
+
+/* Moves every entry of from into to, none of whose names may be taken there, and removes
+ * from. 0; -1 with everything back where it was. */
+static int move_entries(const char *from, const char *to)
+{
+    char **names = folder_names(from, "");
+    if (!names)
+        return -1;
+    char source[PS5_LIBRARY_PATH_MAX], target[PS5_LIBRARY_PATH_MAX];
+    size_t moved = 0, count = 0;
+    int failed = 0;
+    for (; names[count]; count++)
+        if (strcmp(names[count], ".") != 0 && strcmp(names[count], "..") != 0 &&
+            (!joined(source, sizeof(source), from, names[count]) ||
+             !joined(target, sizeof(target), to, names[count]) || is_there(target)))
+            failed = 1;
+    for (; !failed && moved < count; moved++)
+        if (strcmp(names[moved], ".") != 0 && strcmp(names[moved], "..") != 0 &&
+            (!joined(source, sizeof(source), from, names[moved]) ||
+             !joined(target, sizeof(target), to, names[moved]) || rename(source, target) != 0))
+            failed = 1;
+    if (failed)
+        while (moved-- > 0) /* the ones moved before the failure go back */
+            if (strcmp(names[moved], ".") != 0 && strcmp(names[moved], "..") != 0 &&
+                joined(source, sizeof(source), from, names[moved]) &&
+                joined(target, sizeof(target), to, names[moved]))
+                rename(target, source);
+    free_names(names);
+    if (failed)
+        return -1;
+    rmdir(from); /* everything moved: the paths change whether or not it goes */
+    return 0;
+}
+
+/* Each "<content>/<old>" in a file that is followed by '/' or '"' (a game's path, or a
+ * playlist's scan folder) becomes "<content>/<new>"; the file is replaced only when that
+ * changed something. */
+static void rewrite_paths(const char *file, const char *content, const char *const *old_names,
+                          const char *const *new_names, size_t pairs)
+{
+    FILE *input = fopen(file, "rb");
+    if (!input)
+        return;
+    char *text = NULL;
+    long length = 0;
+    if (fseek(input, 0, SEEK_END) == 0 && (length = ftell(input)) > 0 && length < (64L << 20) &&
+        fseek(input, 0, SEEK_SET) == 0 && (text = (char *)malloc((size_t)length)) != NULL &&
+        fread(text, 1, (size_t)length, input) != (size_t)length)
+    {
+        free(text);
+        text = NULL;
+    }
+    fclose(input);
+    if (!text)
+        return;
+    const size_t content_length = strlen(content);
+    size_t longest = 0;
+    for (size_t p = 0; p < pairs; p++)
+        if (strlen(new_names[p]) > longest)
+            longest = strlen(new_names[p]);
+    /* each match is at least content_length + 2 long and grows by at most longest */
+    char *out =
+        (char *)malloc((size_t)length + ((size_t)length / (content_length + 2) + 1) * longest);
+    size_t written = 0, changes = 0;
+    for (long at = 0; out && at < length;)
+    {
+        size_t p = pairs;
+        if ((size_t)(length - at) > content_length &&
+            memcmp(text + at, content, content_length) == 0 &&
+            text[at + (long)content_length] == '/')
+            for (p = 0; p < pairs; p++)
+            {
+                const size_t old_length = strlen(old_names[p]);
+                const long end = at + (long)(content_length + 1 + old_length);
+                if (end < length && (text[end] == '/' || text[end] == '"') &&
+                    memcmp(text + at + content_length + 1, old_names[p], old_length) == 0)
+                    break;
+            }
+        if (p == pairs)
+        {
+            out[written++] = text[at++];
+            continue;
+        }
+        const size_t new_length = strlen(new_names[p]);
+        memcpy(out + written, content, content_length);
+        out[written + content_length] = '/';
+        memcpy(out + written + content_length + 1, new_names[p], new_length);
+        written += content_length + 1 + new_length;
+        at += (long)(content_length + 1 + strlen(old_names[p]));
+        changes++;
+    }
+    free(text);
+    char temporary[PS5_LIBRARY_PATH_MAX];
+    FILE *output = NULL;
+    if (out && changes &&
+        snprintf(temporary, sizeof(temporary), "%s.tmp", file) < (int)sizeof(temporary) &&
+        (output = fopen(temporary, "wb")) != NULL)
+    {
+        const int complete = fwrite(out, 1, written, output) == written;
+        if (fclose(output) == 0 && complete && rename(temporary, file) == 0)
+            chmod(file, 0777); /* FTP's reach: the title's files are 0777 */
+        else
+            remove(temporary);
+    }
+    free(out);
+}
+
+static void rewrite_playlists(const char *folder, const char *content, const char *const *old_names,
+                              const char *const *new_names, size_t pairs)
+{
+    char **names = folder_names(folder, ".lpl");
+    char path[PS5_LIBRARY_PATH_MAX];
+    for (size_t i = 0; names && names[i]; i++)
+        if (joined(path, sizeof(path), folder, names[i]))
+            rewrite_paths(path, content, old_names, new_names, pairs);
+    free_names(names);
+}
+
+/* RetroArch's settings for a content folder, named after it, in each core's folder under
+ * root: content directory overrides and core options, shader presets, remaps. */
+static void rename_folder_settings(const char *root, const char *const *old_names,
+                                   const char *const *new_names, size_t pairs)
+{
+    static const char *const kinds[] = {".cfg", ".opt", ".slangp", ".glslp", ".cgp", ".rmp"};
+    char **cores = folder_names(root, "");
+    char folder[PS5_LIBRARY_PATH_MAX], from[PS5_LIBRARY_PATH_MAX], to[PS5_LIBRARY_PATH_MAX];
+    for (size_t c = 0; cores && cores[c]; c++)
+    {
+        if (cores[c][0] == '.' || !joined(folder, sizeof(folder), root, cores[c]) ||
+            !is_folder(folder))
+            continue;
+        for (size_t p = 0; p < pairs; p++)
+            for (size_t k = 0;
+                 k < sizeof(kinds) / sizeof(kinds[0]) && strcmp(cores[c], old_names[p]) != 0; k++)
+                if (snprintf(from, sizeof(from), "%s/%s%s", folder, old_names[p], kinds[k]) <
+                        (int)sizeof(from) &&
+                    snprintf(to, sizeof(to), "%s/%s%s", folder, new_names[p], kinds[k]) <
+                        (int)sizeof(to) &&
+                    is_file(from) && !is_there(to))
+                    rename(from, to);
+    }
+    free_names(cores);
+}
+
+int ps5_library_rename_system_folders(const char *content, const char *playlists,
+                                      const char *config)
+{
+    char **names = folder_names(content, "");
+    if (!names)
+        return -1;
+    const char *old_names[sizeof(platforms) / sizeof(platforms[0])];
+    const char *new_names[sizeof(platforms) / sizeof(platforms[0])];
+    size_t pairs = 0;
+    char from[PS5_LIBRARY_PATH_MAX], to[PS5_LIBRARY_PATH_MAX];
+    for (size_t i = 0; names[i]; i++)
+    {
+        const struct platform *platform = NULL;
+        for (size_t p = 0; !platform && p < sizeof(platforms) / sizeof(platforms[0]); p++)
+            if (platforms[p].database && strcmp(platforms[p].database, names[i]) == 0)
+                platform = &platforms[p];
+        if (!platform || !joined(from, sizeof(from), content, names[i]) ||
+            !joined(to, sizeof(to), content, platform->id) || !is_folder(from))
+            continue;
+        if (is_there(to) ? !is_folder(to) || move_entries(from, to) != 0 : rename(from, to) != 0)
+            continue;
+        chmod(to, 0777); /* FTP's reach: the title's folders are 0777 */
+        old_names[pairs] = platform->database;
+        new_names[pairs++] = platform->id;
+    }
+    free_names(names);
+    if (pairs)
+    {
+        char folder[PS5_LIBRARY_PATH_MAX];
+        rewrite_playlists(playlists, content, old_names, new_names, pairs);
+        if (joined(folder, sizeof(folder), playlists, "builtin"))
+            rewrite_playlists(folder, content, old_names, new_names, pairs);
+        rename_folder_settings(config, old_names, new_names, pairs);
+        if (joined(folder, sizeof(folder), config, "remaps"))
+            rename_folder_settings(folder, old_names, new_names, pairs);
+    }
+    return (int)pairs;
 }
 
 void ps5_library_free(struct ps5_library *library)
