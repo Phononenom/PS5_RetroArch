@@ -281,3 +281,5 @@
 0129  HTTPS refuses a server whose certificate does not chain to the bundled roots (cacert.h): MBEDTLS_SSL_VERIFY_REQUIRED instead of upstream's optional check whose result was ignored, so nobody on the network path can stand in for RetroAchievements.
 
 0130  A RetroAchievements sign-in that returns a token also removes the password from /app0/config/webui.cfg (with the empty token the WebUI put beside it) and from retroarch.cfg, which keeps its token (src/ps5_cheevos.c).
+
+0131  Frame generation plans on the rate the output really shows flips at: the display context times flips once on its first swapchain where the mode says 59.94 Hz (VRR shows 120 a second there, an output without 120 Hz shows 60), the plan assumes 119.88 only where they came that fast, and a target above the display's rate is the display's rate.

@@ -4907,6 +4907,160 @@ EDITS += [('gfx/drivers/vulkan.c',
   '                              if (0 && fg_made_s > 1.1 * fg_emulated_s && fg_made_s < 8.0 / (double)ps5_fg_core_fps)\n',
   'patches/series, 0128: the producer')]
 
+# Frame generation plans on the rate the output really shows flips at (patches/series, 0131). The mode list says 59.94 Hz
+# both where the console shows 120 flips a second (VRR, which the driver's idle vblank check reads as 48 Hz and turns its
+# 119.88 Hz mode off) and where it shows 60 (no 120 Hz on that output). 0121 assumed 119.88 for every 59.94 mode, so a 60 Hz
+# output held each picture for two refreshes and games ran at half speed with broken audio. The context now times flips
+# once, on its first swapchain, and the plan takes 119.88 only where they came that fast; a target above the display's
+# rate is the display's rate (docs/FINDINGS.md, 2026-10-17).
+EDITS += [('gfx/common/vulkan_common.c',
+  'unsigned vulkan_ps5_display_refresh_x1000;\n'
+  '\n'
+  'static bool vulkan_create_display_surface(gfx_ctx_vulkan_data_t *vk,\n',
+  'unsigned vulkan_ps5_display_refresh_x1000;\n'
+  '/* patches/series, 0131: how fast the output shows flips, in millihertz, where\n'
+  ' * khr_display_ctx.c timed them (0: not timed). */\n'
+  'unsigned vulkan_ps5_flip_rate_x1000;\n'
+  '\n'
+  'static bool vulkan_create_display_surface(gfx_ctx_vulkan_data_t *vk,\n',
+  'patches/series, 0131: how fast the output shows flips, in millihertz, where'),
+ ('gfx/drivers_context/khr_display_ctx.c',
+  'static bool gfx_ctx_khr_display_set_video_mode(void *data,\n',
+  '/* Added by this port (patches/series, 0131): how fast the output shows flips, in\n'
+  ' * millihertz, timed on a new swapchain before RetroArch draws to it; 0 when a call\n'
+  ' * failed. Under FIFO a flip completes per refresh, so once every image is queued each\n'
+  ' * acquire returns as one completes, and the median of the intervals after that is the\n'
+  ' * output\'s period. The mode cannot say it: with VRR the console shows 120 flips a\n'
+  ' * second in its 59.94 Hz mode, and an output without 120 Hz shows 60 in the same mode. */\n'
+  'static unsigned khr_display_ps5_flip_rate(gfx_ctx_vulkan_data_t *vk)\n'
+  '{\n'
+  '   enum { TIMED = 9 };\n'
+  '   double at[VULKAN_MAX_SWAPCHAIN_IMAGES + 1 + TIMED];\n'
+  '   double gaps[TIMED];\n'
+  '   VkFenceCreateInfo fence_info;\n'
+  '   VkFence fence     = VK_NULL_HANDLE;\n'
+  '   VkResult failed   = VK_SUCCESS;\n'
+  '   unsigned presents = vk->context.num_swapchain_images + 1 + TIMED;\n'
+  '   unsigned i, j;\n'
+  '\n'
+  '   if (     vk->swapchain == VK_NULL_HANDLE\n'
+  '         || vk->context.num_swapchain_images < 2\n'
+  '         || vk->context.num_swapchain_images > VULKAN_MAX_SWAPCHAIN_IMAGES\n'
+  '         || (vk->flags & VK_DATA_FLAG_EMULATING_MAILBOX))\n'
+  '      return 0;\n'
+  '   fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;\n'
+  '   fence_info.pNext = NULL;\n'
+  '   fence_info.flags = 0;\n'
+  '   if ((failed = vkCreateFence(vk->context.device, &fence_info, NULL, &fence)) != VK_SUCCESS)\n'
+  '      presents = 0;\n'
+  '   for (i = 0; i < presents && failed == VK_SUCCESS; i++)\n'
+  '   {\n'
+  '      struct timespec now;\n'
+  '      VkPresentInfoKHR present;\n'
+  '      VkResult queued;\n'
+  '      VkResult shown = VK_SUCCESS;\n'
+  '      uint32_t index = 0;\n'
+  '      failed         = vkAcquireNextImageKHR(vk->context.device, vk->swapchain,\n'
+  '            UINT64_C(1000000000), VK_NULL_HANDLE, fence, &index);\n'
+  '      if (failed == VK_SUBOPTIMAL_KHR)\n'
+  '         failed = VK_SUCCESS;\n'
+  '      if (failed != VK_SUCCESS)\n'
+  '         break;\n'
+  '      failed = vkWaitForFences(vk->context.device, 1, &fence, VK_TRUE, UINT64_C(1000000000));\n'
+  '      vkResetFences(vk->context.device, 1, &fence);\n'
+  '      clock_gettime(CLOCK_MONOTONIC, &now);\n'
+  '      at[i] = (double)now.tv_sec * 1e3 + (double)now.tv_nsec / 1e6;\n'
+  '      /* the image goes back whatever the wait said: one kept would be missing from the frames that follow */\n'
+  '      present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;\n'
+  '      present.pNext              = NULL;\n'
+  '      present.waitSemaphoreCount = 0;\n'
+  '      present.pWaitSemaphores    = NULL;\n'
+  '      present.swapchainCount     = 1;\n'
+  '      present.pSwapchains        = &vk->swapchain;\n'
+  '      present.pImageIndices      = &index;\n'
+  '      present.pResults           = &shown;\n'
+  '#ifdef HAVE_THREADS\n'
+  '      slock_lock(vk->context.queue_lock);\n'
+  '#endif\n'
+  '      queued = vkQueuePresentKHR(vk->context.queue, &present);\n'
+  '#ifdef HAVE_THREADS\n'
+  '      slock_unlock(vk->context.queue_lock);\n'
+  '#endif\n'
+  '      if (failed == VK_SUCCESS && queued != VK_SUCCESS && queued != VK_SUBOPTIMAL_KHR)\n'
+  '         failed = queued;\n'
+  '      if (failed == VK_SUCCESS && shown != VK_SUCCESS && shown != VK_SUBOPTIMAL_KHR)\n'
+  '         failed = shown;\n'
+  '   }\n'
+  '   if (fence != VK_NULL_HANDLE)\n'
+  '      vkDestroyFence(vk->context.device, fence, NULL);\n'
+  '   if (failed != VK_SUCCESS)\n'
+  '   {\n'
+  '      RARCH_WARN("[PS5] Flips could not be timed (VkResult %d).\\n", (int)failed);\n'
+  '      return 0;\n'
+  '   }\n'
+  '   /* the intervals once every image was queued, sorted */\n'
+  '   for (i = 0; i < TIMED; i++)\n'
+  '   {\n'
+  '      const double gap = at[presents - TIMED + i] - at[presents - TIMED + i - 1];\n'
+  '      for (j = i; j > 0 && gaps[j - 1] > gap; j--)\n'
+  '         gaps[j] = gaps[j - 1];\n'
+  '      gaps[j] = gap;\n'
+  '   }\n'
+  '   RARCH_LOG("[PS5] Flips timed %.2f to %.2f ms apart, median %.2f ms.\\n",\n'
+  '         gaps[0], gaps[TIMED - 1], gaps[TIMED / 2]);\n'
+  '   return gaps[TIMED / 2] > 0.0 ? (unsigned)(1e6 / gaps[TIMED / 2] + 0.5) : 0;\n'
+  '}\n'
+  '\n'
+  'static bool gfx_ctx_khr_display_set_video_mode(void *data,\n',
+  'patches/series, 0131): how fast the output shows flips, in\n'),
+ ('gfx/drivers_context/khr_display_ctx.c',
+  '         settings->uints.video_swap_interval = 0;\n'
+  '      }\n'
+  '   }\n'
+  '\n'
+  '   return true;\n',
+  '         settings->uints.video_swap_interval = 0;\n'
+  '      }\n'
+  '   }\n'
+  '   /* Added by this port (patches/series, 0131): where the mode says 60 Hz, how fast the\n'
+  '    * output really shows flips, timed once per process on its first swapchain. Frame\n'
+  '    * generation plans on it (retroarch.c). */\n'
+  '   {\n'
+  '      extern unsigned vulkan_ps5_flip_rate_x1000;\n'
+  '      static bool flips_timed;\n'
+  '      if (!flips_timed && khr->refresh_rate_x1000 < 100000)\n'
+  '      {\n'
+  '         flips_timed                = true;\n'
+  '         vulkan_ps5_flip_rate_x1000 = khr_display_ps5_flip_rate(&khr->vk);\n'
+  '         RARCH_LOG("[PS5] The output shows %.3f flips a second in its %.3f Hz mode.\\n",\n'
+  '               vulkan_ps5_flip_rate_x1000 / 1000.0f, khr->refresh_rate_x1000 / 1000.0f);\n'
+  '      }\n'
+  '   }\n'
+  '\n'
+  '   return true;\n',
+  'patches/series, 0131): where the mode says 60 Hz, how fast the'),
+ ('retroarch.c',
+  '      /* The title declares high-frame-rate output (sce_sys/param.json attribute3 0x80040): the console sends\n'
+  '       * 119.88 Hz even where the Vulkan mode list shows its 3840x2160 mode at 59.94, and RetroArch must pace\n'
+  '       * on the real rate or its vsync and audio timing are those of half the display. */\n'
+  '      if (display < 100.0f)\n',
+  '      /* The title declares high-frame-rate output (sce_sys/param.json attribute3 0x80040): with VRR the console\n'
+  '       * shows 119.88 flips a second where the Vulkan mode list says 59.94, and RetroArch must pace on the real\n'
+  '       * rate or its vsync and audio timing are those of half the display.\n'
+  '       * patches/series, 0131: only where the flips were timed that fast (khr_display_ctx.c). An output without\n'
+  '       * 120 Hz shows 60, and planning 119.88 there held every picture for two refreshes: half speed. */\n'
+  '      extern unsigned vulkan_ps5_flip_rate_x1000;\n'
+  '      if (display < 100.0f && vulkan_ps5_flip_rate_x1000 > 100000)\n',
+  'patches/series, 0131: only where the flips were timed that fast'),
+ ('retroarch.c',
+  '         const float target = settings->uints.video_framegen_target == 60 ? 59.94f : 119.88f;\n'
+  '         unsigned dup       = (unsigned)(display / target + 0.5f);\n',
+  '         const float wanted = settings->uints.video_framegen_target == 60 ? 59.94f : 119.88f;\n'
+  '         /* patches/series, 0131: no more pictures than the display shows (120 on a 60 Hz output is 60) */\n'
+  '         const float target = wanted > display * 1.05f ? display : wanted;\n'
+  '         unsigned dup       = (unsigned)(display / target + 0.5f);\n',
+  'patches/series, 0131: no more pictures than the display shows')]
+
 
 def main() -> int:
     if len(sys.argv) != 2:
