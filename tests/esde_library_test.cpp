@@ -216,10 +216,10 @@ int main(int argc, char **argv)
                            .value())
                .empty());
     /* Issue 33: ES-DE's ROM folder is the title's content folder, from the very first
-     * start (no settings file yet), not its own ~/ROMs (/app0/es-de/ROMs). */
+     * start (no settings file yet), not its own ~/ROMs (/app0/es-de/ROMs). On a fresh
+     * install ES-DE's own folder does not exist yet either: the library makes it. */
     {
         const std::string first = dir + "/first", rom = dir + "/content-first";
-        mkdir(first.c_str(), 0755);
         mkdir(rom.c_str(), 0755);
         const char *const roots[] = {rom.c_str(), nullptr};
         const struct ps5_esde_library_paths fresh = {
@@ -233,6 +233,8 @@ int main(int argc, char **argv)
                 file.find_child_by_attribute("string", "name", name).attribute("value").value());
         };
         ps5_esde_write_library_to(&fresh, summary, sizeof(summary));
+        assert(std::string(summary).find(", 0 failures") != std::string::npos);
+        assert(pugi::xml_document().load_file((first + "/custom_systems/es_systems.xml").c_str()));
         assert(value("ROMDirectory") == rom && value("MediaDirectory") == media);
         /* ES-DE's own default, as an older start left it: replaced. */
         write_text(first + "/settings/es_settings.xml",

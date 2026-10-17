@@ -306,7 +306,11 @@ extern "C" int ps5_esde_write_library_to(const struct ps5_esde_library_paths *pa
     }
     const std::map<std::string, Reference> reference = read_reference(paths->reference);
     const std::string data = paths->data;
-    /* Folders 0777 whatever the umask, for FTP's reach (src/permissions_ps5.cpp). */
+    /* Folders 0777 whatever the umask, for FTP's reach (src/permissions_ps5.cpp). ES-DE makes
+     * its own folder only once it runs, after this: on a fresh install's first start every
+     * write below failed and ES-DE showed no games, so the folder is made here first. */
+    mkdir(data.c_str(), 0777);
+    chmod(data.c_str(), 0777);
     for (const char *folder : {"/custom_systems", "/gamelists"})
     {
         mkdir((data + folder).c_str(), 0777);
