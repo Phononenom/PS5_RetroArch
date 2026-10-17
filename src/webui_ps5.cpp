@@ -1187,13 +1187,19 @@ struct BatchUpload final : ps5_transfer::BatchSink
         else
             fail("cannot finish");
     }
-    ~BatchUpload() override
+    /* The file a cut stream was in the middle of goes */
+    void abandon()
     {
         const int fd = writer.release();
         if (fd >= 0)
             close(fd);
         if (!temporary.empty())
             unlink(temporary.c_str());
+        temporary.clear();
+    }
+    ~BatchUpload() override
+    {
+        abandon();
     }
 };
 struct BatchState
@@ -1970,6 +1976,10 @@ MHD_Result transfer_route(MHD_Connection *c, const std::string &url, const std::
             failed += (failed.size() > 1 ? "," : "") + std::string("{\"name\":") + quote(f.first) +
                       ",\"error\":" + quote(f.second) + '}';
         const bool whole = state->reader.finished() && r.received == r.expected;
+        /* Before the answer, not when the request is freed after it: a client that reads
+         * the folder the moment the answer arrives must not find the partial file. */
+        if (!whole)
+            b.abandon();
         return respond(c, whole ? 200 : 400,
                        "{\"complete\":" + std::string(whole ? "true" : "false") + ",\"written\":" +
                            std::to_string(b.written) + ",\"skipped\":" + std::to_string(b.skipped) +
