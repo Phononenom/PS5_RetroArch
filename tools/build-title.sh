@@ -492,9 +492,19 @@ cp "$lapy_daemon" "$dist/lapy-root-daemon.elf"
 # database (issue 35); game rows keep XMB's own content icon.
 python3 "$root/tools/xmb-system-icons.py" "$dist/assets/xmb/monochrome/png"
 # The certificates the daemon verifies HTTPS against (curl over mbedTLS): Mozilla's
-# bundle as EmulationStation ships it, from its pinned source.
-certificates="$root/.deps/es-de/resources/certificates/curl-ca-bundle.crt"
-[[ -f $certificates ]] || { echo "error: $certificates is missing (tools/build-esde.sh fetches it)" >&2; exit 1; }
+# bundle as EmulationStation ships it, at the ES-DE commit tools/build-esde.sh pins,
+# fetched by itself: ES-DE's checkout comes later with its build, and a development
+# build has none.
+esde_commit=$(sed -n 's/^esde_commit=//p' "$root/tools/build-esde.sh")
+certificates="$root/.deps/downloads/curl-ca-bundle-${esde_commit:0:12}.crt"
+if [[ ! -f $certificates ]]; then
+    mkdir -p "$root/.deps/downloads"
+    curl --fail --location --retry 3 -o "$certificates.download" \
+        "https://gitlab.com/es-de/emulationstation-de/-/raw/$esde_commit/resources/certificates/curl-ca-bundle.crt"
+    mv -- "$certificates.download" "$certificates"
+fi
+printf '%s  %s\n' f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9 "$certificates" |
+    sha256sum --check --status || { echo "error: $certificates is not ES-DE's bundle" >&2; exit 1; }
 cp "$certificates" "$dist/webui/ca-bundle.crt"
 # Core option catalogs are available before the first game is opened.
 mkdir -p "$dist/webui/core-metadata"
