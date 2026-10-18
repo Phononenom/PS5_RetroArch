@@ -142,7 +142,8 @@
       "name": "PS5 RetroArch (this port: title code, platform integration, build scripts and patches)",
       "kind": "code",
       "always": true,
-      "artifacts": ["eboot.bin", "retroarch.cfg", "LEGAL.txt", "sce_sys/param.json", "es-de/es-de.bin", "picker/picker.bin"],
+      "artifacts": ["eboot.bin", "retroarch.cfg", "LEGAL.txt", "sce_sys/param.json", "es-de/es-de.bin", "picker/picker.bin",
+        "forwarder/eboot.bin", "forwarder/launch.elf"],
       "licence": "GPL-3.0-or-later",
       "copyright": [
         "Copyright (C) 2026 Mihawk",
@@ -180,7 +181,7 @@
       "name": "PS5 payload SDK fork and its platform layer (libps5platform.a, headers, import stubs)",
       "kind": "code",
       "always": true,
-      "artifacts": ["eboot.bin", "cores/*.so", "es-de/es-de.bin"],
+      "artifacts": ["eboot.bin", "cores/*.so", "es-de/es-de.bin", "forwarder/eboot.bin", "forwarder/launch.elf"],
       "licence": "GPL-3.0-or-later",
       "copyright": ["Copyright (C) 2022-2026 John Törnblom and ps5-payload-dev contributors", "Copyright (C) 2026 Mihawk (the platform layer)"],
       "texts": [

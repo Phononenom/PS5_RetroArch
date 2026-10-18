@@ -26,8 +26,8 @@ import sys
 from pathlib import Path
 
 COVERED = ("lapy-root-daemon.elf", "eboot.bin", "es-de/*.bin", "picker/*.bin", "sce_module/*.prx", "cores/*.so", "cores/*.info",
-           "info/*.info")
-EXECUTABLE = ("eboot.bin", "es-de.bin", "picker.bin", "lapy-root-daemon.elf", "*.prx", "*.so")
+           "info/*.info", "forwarder/eboot.bin", "forwarder/launch.elf")
+EXECUTABLE = ("eboot.bin", "es-de.bin", "picker.bin", "lapy-root-daemon.elf", "launch.elf", "*.prx", "*.so")
 
 
 def sha256(path):
