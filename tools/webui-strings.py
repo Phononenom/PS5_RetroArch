@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WEBUI = ROOT / 'webui'
-SCRIPTS = ('app.js', 'add-game.js', 'settings-guide.js')
+SCRIPTS = ('app.js', 'add-game.js', 'settings-guide.js', 'forwarders.js')
 OUT = WEBUI / 'i18n' / 'strings.json'
 ATTRIBUTES = ('placeholder', 'title', 'aria-label', 'alt')
 # Never translated: names, paths and identifiers.

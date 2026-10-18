@@ -2255,6 +2255,7 @@ MHD_Result route(MHD_Connection *c, const std::string &url, const std::string &m
         {"/app.js", "text/javascript; charset=utf-8"},
         {"/icons.js", "text/javascript; charset=utf-8"},
         {"/add-game.js", "text/javascript; charset=utf-8"},
+        {"/forwarders.js", "text/javascript; charset=utf-8"},
         {"/assets/fluent/LICENSE", "text/plain; charset=utf-8"},
         {"/assets/fluent/arrow-square-down.svg", "image/svg+xml"},
         {"/assets/fluent/arrow-sync.svg", "image/svg+xml"},

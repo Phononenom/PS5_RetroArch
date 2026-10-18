@@ -7,18 +7,18 @@ import http.server
 import json
 import os
 from pathlib import Path
-import socket
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import webui_build  # noqa: E402
+from test_webui_transfer_browser import PLAYWRIGHT  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 FINISH_MAIN = r'''
@@ -96,9 +96,11 @@ class Forwarders(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         cls.homebrew = Path(cls.temp.name)
         cls.root = cls.homebrew / 'PPSA99169'
-        for name, data in {'webui/index.html': b'<!doctype html><title>RetroArch</title>',
-                           'content/snes/Game (World).zip': b'game', 'cores/snes9x_libretro.so': b'core',
-                           'info/snes9x_libretro.info': b'# info\ncorename = "Snes9x"\n',
+        shutil.copytree(ROOT / 'webui', cls.root / 'webui')
+        for name, data in {'content/snes/Game (World).zip': b'game', 'cores/snes9x_libretro.so': b'core',
+                           'info/snes9x_libretro.info': b'# info\ncorename = "Snes9x"\n'
+                           b'database = "Nintendo - Super Nintendo Entertainment System"\n'
+                           b'supported_extensions = "smc|sfc|zip"\n',
                            'forwarder/eboot.bin': b'tile app', 'forwarder/launch.elf': b'launch payload',
                            'sce_module/libc.prx': b'libc', 'sce_sys/icon0.png': png(512, 512)}.items():
             (cls.root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -114,26 +116,15 @@ class Forwarders(unittest.TestCase):
         (cls.homebrew / 'finish.cpp').write_text(FINISH_MAIN)
         subprocess.run(['c++', '-std=c++17', '-O1', '-Wall', '-Werror', '-Isrc', str(cls.homebrew / 'finish.cpp'),
                         'src/ps5_forwarders.cpp', '-o', str(cls.finish)], cwd=ROOT, check=True)
-        with socket.socket() as s:
-            s.bind(('127.0.0.1', 0))
-            cls.port = s.getsockname()[1]
-        env = {**os.environ, 'PS5_FORWARDERS_SHADOWMOUNT_PORT': str(cls.smp.server_port)}
-        cls.process = subprocess.Popen([str(cls.binary), str(cls.root), str(cls.port)], env=env,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(400):
-            try:
-                cls.token = json.loads(cls.request('GET', '/api/status')[1])['token']
-                break
-            except OSError:
-                time.sleep(0.02)
-        else:
-            raise RuntimeError('the server did not start')
+        cls.process, cls.port, cls.token = webui_build.start(
+            cls.binary, cls.root, {**os.environ, 'PS5_FORWARDERS_SHADOWMOUNT_PORT': str(cls.smp.server_port)})
 
     @classmethod
     def tearDownClass(cls):
         cls.process.terminate()
         cls.process.wait(timeout=5)
         cls.smp.shutdown()
+        cls.smp.server_close()
         cls.temp.cleanup()
 
     @classmethod
@@ -173,10 +164,11 @@ class Forwarders(unittest.TestCase):
         # what a tile may hold
         for tile, words in [({'name': ' ', 'rom': 'snes/Game (World).zip'}, 'name'),
                             ({'name': 'One\nTwo', 'rom': 'snes/Game (World).zip'}, 'name'),
-                            ({'name': 'Tile', 'rom': '../PPSA99169/eboot.bin'}, 'content folder'),
-                            ({'name': 'Tile', 'rom': '/data/x.zip'}, 'content folder'),
-                            ({'name': 'Tile', 'rom': 'snes/Missing.zip'}, 'content folder'),
-                            ({'name': 'Tile', 'rom': 'snes/Game (World).zip\n--core'}, 'content folder'),
+                            ({'name': 'Tile', 'rom': '../PPSA99169/eboot.bin'}, 'your library'),
+                            ({'name': 'Tile', 'rom': '/data/x.zip'}, 'your library'),
+                            ({'name': 'Tile', 'rom': '/mnt/usb0/../data/x.zip'}, 'your library'),
+                            ({'name': 'Tile', 'rom': 'snes/Missing.zip'}, 'your library'),
+                            ({'name': 'Tile', 'rom': 'snes/Game (World).zip\n--core'}, 'your library'),
                             ({'name': 'Tile', 'rom': 'snes/Game (World).zip', 'core': '../x'}, 'core'),
                             ({'name': 'Tile', 'rom': 'snes/Game (World).zip', 'core': 'mgba'}, 'core')]:
             status, body = self.request('POST', '/api/forwarders', tile)
@@ -243,6 +235,20 @@ class Forwarders(unittest.TestCase):
         for other in ('PPSA99170', 'PPSA99169', '../PPSA99169'):
             self.assertEqual(self.request('POST', f'/api/forwarders/delete?id={other}')[0], 400)
         self.assertTrue((self.homebrew / 'PPSA99170').is_dir() and self.root.is_dir())
+
+    @unittest.skipUnless(PLAYWRIGHT and shutil.which('node') and Path('/usr/bin/chromium').exists(),
+                         'needs node, Playwright and Chromium')
+    def test_page_in_chromium(self):
+        system = json.loads(self.request('GET', '/api/library')[1])['systems'][0]
+        for folder, picture in (('covers', png(300, 420, b'\xe0\x20\x20')), ('marquees', png(400, 100, b'\x20\xd0\x40'))):
+            path = self.root / 'library' / system['id'] / folder / (system['games'][0]['key'] + '.png')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(picture)
+        run = subprocess.run(['node', 'tests/webui_forwarders_browser.cjs'], cwd=ROOT, capture_output=True, text=True,
+                             timeout=300, env={**os.environ, 'PLAYWRIGHT_PATH': PLAYWRIGHT,
+                                               'WEBUI_TEST_URL': f'http://127.0.0.1:{self.port}'})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('PASS:', run.stdout)
 
     def test_waiting_tile_goes_at_once_and_new_names_install_again(self):
         state = self.smp.state

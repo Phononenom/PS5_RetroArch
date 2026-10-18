@@ -343,9 +343,11 @@ bool plain(const std::string &text)
     return std::none_of(text.begin(), text.end(),
                         [](unsigned char c) { return c < 32 || c == 127; });
 }
-/* What a tile may hold: a name, a game inside the content folder, a core the title has. */
+/* What a tile may hold: a name, a game of the library (inside the content folder, or on a
+ * USB or extended storage drive, as the library reads them), a core the title has. */
 bool check(const Paths &paths, const Tile &tile, std::string &why)
 {
+    const bool drive = tile.rom.rfind("/mnt/usb", 0) == 0 || tile.rom.rfind("/mnt/ext", 0) == 0;
     bool parent = false;
     for (size_t at = 0; at <= tile.rom.size();)
     {
@@ -358,9 +360,9 @@ bool check(const Paths &paths, const Tile &tile, std::string &why)
     if (tile.name.find_first_not_of(' ') == std::string::npos || tile.name.size() > 128 ||
         !plain(tile.name))
         why = "Give the tile a name (up to 128 bytes, on one line).";
-    else if (tile.rom.empty() || tile.rom[0] == '/' || parent || !plain(tile.rom) ||
-             !exists(paths.title + "/content/" + tile.rom))
-        why = "Choose a game from the content folder.";
+    else if (tile.rom.empty() || (tile.rom[0] == '/' && !drive) || parent || !plain(tile.rom) ||
+             !exists(drive ? tile.rom : paths.title + "/content/" + tile.rom))
+        why = "Choose a game from your library.";
     else if (!tile.core.empty() &&
              (!std::all_of(
                   tile.core.begin(), tile.core.end(), [](char c)
