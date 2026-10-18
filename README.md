@@ -254,6 +254,26 @@ and **EXTERNAL** (`/mnt`) may be empty.
 
 ## <img src="webui/assets/fluent/game-chat.svg" width="26" height="26" alt=""> Start a game from a home screen forwarder
 
+### Make a tile in the WebUI
+
+The WebUI's **Game Forwarder** page makes home screen tiles that each open one game in
+RetroArch. Choose a system, then one of its games from your library, the name the home screen
+shows, the core (the game's own is chosen for you) and a picture: its box art, 3D box, logo,
+cartridge or disc, screenshot, title screen or fan art, filling the square or fitted in it, with
+the system's icon in the bottom right corner if you like. A picture the game has no file for
+yet is greyed out; **Download Media** can find it. Choose **Create tile**, then close
+RetroArch: the tile appears on the home screen. A new name or picture, and a tile you delete,
+reach the home screen the same way, once RetroArch closes.
+
+A tile is a small title of its own, `PPSA99170` to `PPSA99269` in `/data/homebrew`, which
+[ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus) 1.7 or later installs. The page
+needs it loaded with its API on (the default), and says so when it does not answer.
+ShadowMountPlus installs and removes nothing while a game runs, and RetroArch counts as one:
+that is why changes wait for RetroArch to close. Delete tiles from the page, which also removes
+their folder. A tile opens a game in the content folder or on a USB or extended storage drive.
+
+### Make a forwarder by hand
+
 A forwarder is a small app with its own home screen tile that launches `PPSA99169` with
 launch arguments. The title then starts that game in RetroArch with the core given, instead of
 opening the picker or a frontend.
