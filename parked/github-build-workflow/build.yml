@@ -9,6 +9,8 @@
 # optional cores and every seed script against the current pins. Done means: moved back to
 # .github/workflows/ (its scripts to .github/scripts/), a run on a fork whose zip passes
 # tools/check-manifest.sh and tools/check-notices.py, and that zip loading on a console.
+# The ScreenScraper developer account is never given to it: a public repository's workflow
+# artifacts can be downloaded by anyone (the pull request passed it from repository secrets).
 #
 # README's workspace, made from public sources at their pins, with this checkout as PS5_RetroArch:
 #
@@ -454,10 +456,6 @@ jobs:
 
       - name: Build the title (tools/build-title.sh)
         working-directory: PS5_RetroArch
-        env:
-          # the WebUI's ScreenScraper developer account, when the repository has one
-          PS5_SCREENSCRAPER_DEVID: ${{ secrets.PS5_SCREENSCRAPER_DEVID }}
-          PS5_SCREENSCRAPER_DEVPASSWORD: ${{ secrets.PS5_SCREENSCRAPER_DEVPASSWORD }}
         run: |
           export PS5_PAYLOAD_SDK=$PWD/.deps/native/ps5-payload-sdk PS5_CLANG=/usr/bin/clang
           JOBS=$(nproc)
