@@ -65,6 +65,10 @@ core_names=(fceumm mgba snes9x fbneo genesis_plus_gx ppsspp dolphin
 if [[ ${PS5_WITH_SWANSTATION:-0} == 1 ]]; then
     core_names+=(swanstation)
 fi
+# Keep the established DS default; owners can opt into the new microphone core.
+if [[ ${PS5_WITH_MELONDSDS:-0} == 1 ]]; then
+    core_names+=(melondsds)
+fi
 # RPCS3 is not part of the title by default, console builds included: PS3 is no
 # longer a target (2026-10-04), so no deployment puts it on a console.
 # tools/build-rpcs3.sh still builds the core on this machine, and PS5_WITH_RPCS3=1
@@ -410,8 +414,8 @@ for core_name in "${core_names[@]}"; do
     cp -- "$root/build/cores/stage/info/${core_name}_libretro.info" "$dist/info/"
     # Older saved configs have an empty info path: upstream then searches cores/.
     cp -- "$root/build/cores/stage/info/${core_name}_libretro.info" "$dist/cores/"
-    if [[ $core_name == swanstation ]]; then
-        cp -- "$root/build/cores/stage/info/swanstation-LICENSE.txt" "$dist/info/"
+    if [[ $core_name == swanstation || $core_name == melondsds ]]; then
+        cp -- "$root/build/cores/stage/info/${core_name}-LICENSE.txt" "$dist/info/"
     fi
 done
 

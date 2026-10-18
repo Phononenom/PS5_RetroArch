@@ -63,7 +63,9 @@ configure_flags=(
     --enable-networking --enable-netplaydiscovery --enable-cheevos --enable-ssl
     # Libraries this SDK does not carry.
     --disable-ffmpeg --disable-freetype
-    --disable-cdrom --disable-microphone
+    --disable-cdrom
+    # The microphone driver is this port's own (src/microphone_ps5.cpp, on AudioIn).
+    --enable-microphone
     --disable-qt --disable-discord --disable-oss --disable-jack --disable-alsa
     --disable-pulse --disable-pipewire --disable-wayland --disable-x11
     --disable-kms --disable-caca --disable-sixel --disable-bluetooth

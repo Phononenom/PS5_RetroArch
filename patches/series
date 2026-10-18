@@ -287,3 +287,7 @@
 0132  Frame generation off presents each game frame once: the presents per game frame it planned are kept in retroarch.cfg, and the 2 left there once it was turned off (in its menus or ES-DE's) held every frame for two refreshes, half speed on a 60 Hz output. Turning it on or off in the menus reinitializes the video output, so the change applies at once (src/ps5_framegen_menu.c).
 
 0133  Enable bundled FLAC for the frontend's CHD reader. libchdr rejects a CHD declaring CD FLAC when that codec is absent, preventing RetroAchievements hashing even when the emulation core can read the same disc.
+
+0134  Native user-routed AudioIn microphone backend (src/microphone_ps5.cpp), the default driver. It captures only while a core has its microphone on (melonDS DS while its microphone button is held, its default), sends silence under the DualSense mute, and keeps PCM only in a bounded in-memory queue; cores use the standard libretro microphone interface.
+
+0135  A microphone read that produces no frames returns silence rather than looping forever on a paused core, a temporarily empty nonblocking device, or a capture failure.

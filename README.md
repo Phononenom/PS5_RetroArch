@@ -348,6 +348,27 @@ pins RetroArch 1.22.2, fetches core sources/metadata with checked hashes, builds
 frontend and thirty-three cores, and stages the native title in `dist/PPSA99169/`.
 The initial dependency/source fetch requires network access.
 
+To include the optional melonDS DS core, build with
+`PS5_WITH_MELONDSDS=1 bash tools/build-title.sh`. It uses pinned upstream sources
+and the software renderer with a native-memory JIT; DeSmuME remains available.
+`bash tools/build-melondsds.sh` builds and ABI-checks the core by itself.
+
+The `ps5` microphone driver is the default. A core hears the DualSense microphone
+only while it turns its microphone on (melonDS DS while its microphone button is
+held, its default), the DualSense mute button silences it, and **Settings → Audio →
+Microphone** turns it off for every core. Capture stays in memory; the driver does
+not record files or send audio over the network.
+
+In melonDS DS, select `Microphone` as the input mode and `Always` as its button
+mode to use the DualSense mute button without assigning another game button.
+The core's screen-layout and microphone indicators can be hidden independently
+under **On-Screen Display & Notifications**.
+
+The optional melonDS DS port also accepts the DualSense touchpad as a relative
+stylus in Joystick or Auto touch mode. Slide to position the cursor, press to
+touch, and hold the press while sliding to drag. L2 remains available as Select;
+the touchpad click is reserved for the stylus while this core is running.
+
 For an already configured checkout:
 
 ```bash
