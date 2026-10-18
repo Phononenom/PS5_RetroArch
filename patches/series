@@ -283,3 +283,5 @@
 0130  A RetroAchievements sign-in that returns a token also removes the password from /app0/config/webui.cfg (with the empty token the WebUI put beside it) and from retroarch.cfg, which keeps its token (src/ps5_cheevos.c).
 
 0131  Frame generation plans on the rate the output really shows flips at: the display context times flips once on its first swapchain where the mode says 59.94 Hz (VRR shows 120 a second there, an output without 120 Hz shows 60), the plan assumes 119.88 only where they came that fast, and a target above the display's rate is the display's rate.
+
+0132  Frame generation off presents each game frame once: the presents per game frame it planned are kept in retroarch.cfg, and the 2 left there once it was turned off (in its menus or ES-DE's) held every frame for two refreshes, half speed on a 60 Hz output. Turning it on or off in the menus reinitializes the video output, so the change applies at once (src/ps5_framegen_menu.c).

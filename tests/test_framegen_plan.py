@@ -1,4 +1,4 @@
-"""Run frame generation's plan (patches 0121 and 0131) as the port inserts it, for each kind of output."""
+"""Run frame generation's plan (patches 0121, 0131 and 0132) as the port inserts it, for each kind of output."""
 import importlib.util
 import subprocess
 import tempfile
@@ -33,10 +33,12 @@ typedef struct {
 } settings_t;
 unsigned vulkan_ps5_display_refresh_x1000, vulkan_ps5_flip_rate_x1000, ps5_fg_dup;
 float ps5_fg_core_fps, ps5_fg_target_fps;
-/* The presents per game frame for a mode and the flips timed in it; refresh: what RetroArch then paces on. */
-static unsigned plan(unsigned mode, unsigned flips, unsigned target, double input_fps, float *refresh)
+/* The presents per game frame, frame generation on or off with what an earlier run left in retroarch.cfg, for a mode
+ * and the flips timed in it; refresh: what RetroArch then paces on. */
+static unsigned plan_after(bool framegen, unsigned left, unsigned mode, unsigned flips, unsigned target,
+                           double input_fps, float *refresh)
 {
-   settings_t s = {{true, true}, {target, 1}, {mode / 1000.0f}};
+   settings_t s = {{framegen, true}, {target, left}, {mode / 1000.0f}};
    settings_t *settings = &s;
    float video_refresh_rate = settings->floats.video_refresh_rate;
    vulkan_ps5_display_refresh_x1000 = mode;
@@ -45,6 +47,10 @@ static unsigned plan(unsigned mode, unsigned flips, unsigned target, double inpu
    (void)video_refresh_rate;
    *refresh = settings->floats.video_refresh_rate;
    return settings->uints.video_shader_subframes;
+}
+static unsigned plan(unsigned mode, unsigned flips, unsigned target, double input_fps, float *refresh)
+{
+   return plan_after(true, 1, mode, flips, target, input_fps, refresh);
 }
 int main(void)
 {
@@ -63,6 +69,9 @@ int main(void)
    /* The 119.88 Hz mode itself */
    assert(plan(119880, 0, 120, 60.0, &refresh) == 2 && ps5_fg_dup == 1);
    assert(plan(119880, 0, 60, 60.0, &refresh) == 2 && ps5_fg_dup == 2);
+   /* Frame generation turned off: the 2 it left is one present per game frame again, on either output */
+   assert(plan_after(false, 2, 59940, 59940, 120, 60.0, &refresh) == 1);
+   assert(plan_after(false, 2, 59940, 119880, 120, 60.0, &refresh) == 1);
    return 0;
 }
 '''

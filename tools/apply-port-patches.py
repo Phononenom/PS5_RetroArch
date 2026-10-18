@@ -5061,6 +5061,30 @@ EDITS += [('gfx/common/vulkan_common.c',
   '         unsigned dup       = (unsigned)(display / target + 0.5f);\n',
   'patches/series, 0131: no more pictures than the display shows')]
 
+# Frame generation off presents each game frame once (patches/series, 0132). The plan writes the presents per game frame into
+# video_shader_subframes, which retroarch.cfg keeps: once frame generation was turned off (in these menus or ES-DE's), the 2 it
+# left there held every frame for two refreshes, and a 60 Hz output ran games at half speed. Turning it on or off in the menus
+# reinitializes the video output, so the plan applies at once (src/ps5_framegen_menu.c).
+EDITS += [('retroarch.c',
+  '         settings->uints.video_shader_subframes = s * dup;\n'
+  '      }\n'
+  '   }\n'
+  '   unsigned shader_subframes              = settings->uints.video_shader_subframes;\n',
+  '         settings->uints.video_shader_subframes = s * dup;\n'
+  '      }\n'
+  '   }\n'
+  '   /* patches/series, 0132: frame generation off presents each game frame once. What it planned is kept in\n'
+  '    * retroarch.cfg, and a 2 left there would hold every frame for two refreshes. */\n'
+  '   else if (!settings->bools.video_framegen || !settings->bools.video_framegen_auto)\n'
+  '   {\n'
+  '      if (settings->uints.video_shader_subframes > 1)\n'
+  '         RARCH_LOG("[FrameGen] Off: each game frame is presented once (%u presents were kept).\\n",\n'
+  '               settings->uints.video_shader_subframes);\n'
+  '      settings->uints.video_shader_subframes = 1;\n'
+  '   }\n'
+  '   unsigned shader_subframes              = settings->uints.video_shader_subframes;\n',
+  'patches/series, 0132: frame generation off presents each game frame once')]
+
 
 def main() -> int:
     if len(sys.argv) != 2:
