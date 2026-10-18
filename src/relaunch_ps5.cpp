@@ -14,7 +14,9 @@
  *
  * /app0/relaunch-test.txt ("<count> <run id> [image]", written by tools/run-title.sh
  * --relaunch-test, with --relaunch-image naming another image of the title in /app0)
- * arms it. Each process the test starts appends one line to
+ * arms it; each line after the first (--relaunch-arg) is one more argument the restarts
+ * carry, as a home screen forwarder's --rom and --core do (src/frontend_mode_ps5.cpp).
+ * Each process the test starts appends one line to
  * /app0/relaunch-test.jsonl: its generation, which is the number of this run's
  * lines already in the file (so a restart that lost its arguments still counts,
  * and cannot loop), the generation its arguments name, argc and argv, the
@@ -118,7 +120,9 @@ bool parse_arm(const std::string &text, Arm &arm)
     unsigned count = 0;
     char run[48] = {};
     char image[256] = {};
-    const int fields = std::sscanf(text.c_str(), "%u %47s %255s", &count, run, image);
+    const std::size_t first_end = text.find('\n');
+    const int fields =
+        std::sscanf(text.substr(0, first_end).c_str(), "%u %47s %255s", &count, run, image);
     if (fields < 2 || count == 0 || count > max_count)
         return false;
     for (const char *at = run; *at; at++)
@@ -129,9 +133,28 @@ bool parse_arm(const std::string &text, Arm &arm)
     if (fields == 3 && (std::strncmp(image, "/app0/", 6) != 0 || std::strstr(image, "..") ||
                         std::strpbrk(image, "\"\\")))
         return false;
+    /* The lines after the first are arguments for the restarts, one a line. */
+    std::vector<std::string> arguments;
+    for (std::size_t at = first_end; at != std::string::npos && at + 1 < text.size();)
+    {
+        const std::size_t end = text.find('\n', at + 1);
+        std::string argument = text.substr(at + 1, end == std::string::npos ? end : end - at - 1);
+        at = end;
+        if (!argument.empty() && argument.back() == '\r')
+            argument.pop_back();
+        if (argument.empty())
+            continue;
+        if (arguments.size() == 8 || argument.size() > 255)
+            return false;
+        for (const char c : argument)
+            if (static_cast<unsigned char>(c) < 0x20)
+                return false;
+        arguments.push_back(argument);
+    }
     arm.count = count;
     arm.run = run;
     arm.image = fields == 3 ? image : "";
+    arm.arguments = arguments;
     return true;
 }
 
@@ -240,11 +263,14 @@ bool run_test(const Paths &paths, int argc, char **argv, unsigned replaced_wait_
     }
 
     const std::string next = std::string(token) + std::to_string(current + 1);
-    const char *const arguments[] = {next.c_str(), nullptr};
+    std::vector<const char *> arguments{next.c_str()};
+    for (const std::string &argument : arm.arguments)
+        arguments.push_back(argument.c_str());
+    arguments.push_back(nullptr);
     std::fflush(nullptr);
     const std::string &image = arm.image.empty() ? paths.image : arm.image;
     ps5_permissions_settle();
-    const int result = sceSystemServiceLoadExec(image.c_str(), arguments);
+    const int result = sceSystemServiceLoadExec(image.c_str(), arguments.data());
     std::string event = line_start(arm.run, current) +
                         ",\"event\":\"loadexec\",\"result\":" + std::to_string(result);
     if (result >= 0)

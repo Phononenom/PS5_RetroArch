@@ -10,6 +10,9 @@
 #   tools/run-title.sh --relaunch-test=5 --watch 60  restart the title 5 times, then RetroArch
 #   tools/run-title.sh --relaunch-test=1 --relaunch-image=probe/eboot-copy.bin --watch 45
 #                                       restart through a copy of eboot.bin at /app0/probe/...
+#   tools/run-title.sh --relaunch-test=1 --relaunch-arg=--rom --relaunch-arg=snes/Game.zip \
+#       --relaunch-arg=--core --relaunch-arg=snes9x --watch 45
+#                                       restart with a home screen forwarder's arguments
 #   tools/run-title.sh --display-modes-test=180 --watch 60  every display size, then RetroArch
 #   tools/run-title.sh --relaunch-test=1 --relaunch-image=es-de/es-de.bin --frontend-capture=20,40 --watch 60
 #                                       hand over to EmulationStation, picture its frames at 20 and 40 s
@@ -81,6 +84,7 @@ core_test=none
 relaunch_test=0
 display_modes_test=0
 relaunch_image=
+relaunch_args=
 frontend_capture=
 frontend_scroll=
 picker_test=
@@ -103,6 +107,7 @@ while (( $# )); do
         --relaunch-test) relaunch_test=5 ;;
         --relaunch-test=*) relaunch_test=${1#*=} ;;
         --relaunch-image=*) relaunch_image=${1#*=} ;;
+        --relaunch-arg=*) relaunch_args+="${1#*=}"$'\n' ;;
         --display-modes-test) display_modes_test=180 ;;
         --display-modes-test=*) display_modes_test=${1#*=} ;;
         --frontend-capture=*) frontend_capture=${1#*=} ;;
@@ -119,7 +124,7 @@ while (( $# )); do
         --menu-capture=*) menu_capture=${1#*=} ;;
         --home-launch) home_launch=1 ;;
         --retroarch-arg=*) retroarch_args+="${1#*=}"$'\n' ;;
-        *) echo "usage: ${0##*/} [--no-build] [--no-deploy] [--watch SECONDS] [--gpu-profile 1..60] [--audio-test] [--core-test[=fceumm|mgba|snes9x|fbneo|genesis_plus_gx|ppsspp]] [--relaunch-test[=1..20] [--relaunch-image=PATH]] [--display-modes-test[=frames]] [--frontend-capture=SECONDS[,SECONDS...] [--frontend-scroll] [--frontend-profile] [--frontend-quit] [--frontend-launch]] [--picker-test=FRAMES:retroarch|es-de|none] [--retroarch-frames=N] [--game=CORE:PATH] [--pad-script=FILE] [--pad-monitor] [--menu-capture=FRAMES] [--home-launch] [--retroarch-arg=ARG ...]" >&2; exit 2 ;;
+        *) echo "usage: ${0##*/} [--no-build] [--no-deploy] [--watch SECONDS] [--gpu-profile 1..60] [--audio-test] [--core-test[=fceumm|mgba|snes9x|fbneo|genesis_plus_gx|ppsspp]] [--relaunch-test[=1..20] [--relaunch-image=PATH] [--relaunch-arg=ARG ...]] [--display-modes-test[=frames]] [--frontend-capture=SECONDS[,SECONDS...] [--frontend-scroll] [--frontend-profile] [--frontend-quit] [--frontend-launch]] [--picker-test=FRAMES:retroarch|es-de|none] [--retroarch-frames=N] [--game=CORE:PATH] [--pad-script=FILE] [--pad-monitor] [--menu-capture=FRAMES] [--home-launch] [--retroarch-arg=ARG ...]" >&2; exit 2 ;;
     esac
     shift
 done
@@ -140,6 +145,9 @@ if (( relaunch_test && watch < 30 )); then
     exit 2
 fi
 relaunch_run=relaunch-$(date +%Y%m%d-%H%M%S)
+# Arguments the restarts carry, one a line after the arm line (a forwarder's --rom and --core).
+[[ -z $relaunch_args ]] || (( relaunch_test )) ||
+    { echo "--relaunch-arg needs --relaunch-test" >&2; exit 2; }
 # Another image of the title, a path under /app0: a copy of this build's eboot.bin.
 if [[ -n $relaunch_image ]]; then
     (( relaunch_test )) || { echo "--relaunch-image needs --relaunch-test" >&2; exit 2; }
@@ -294,7 +302,7 @@ fi
 # appeared. A run that does not ask for extras must not inherit them, so the file
 # is removed on every run - before the launch, because deleting it afterwards
 # would leave it for the next one if this run dies.
-python3 - "$title_id" "$profile" "$audio_test" "$core_test" "$relaunch_test" "$relaunch_run" "$display_modes_test" "$relaunch_image" "$frontend_capture" "$capture_run" "$frontend_scroll" "$picker_test" "$retroarch_frames" "$pad_script" "$pad_monitor" "$home_launch" "$game" "$menu_capture" "$retroarch_args" <<'PY'
+python3 - "$title_id" "$profile" "$audio_test" "$core_test" "$relaunch_test" "$relaunch_run" "$display_modes_test" "$relaunch_image" "$frontend_capture" "$capture_run" "$frontend_scroll" "$picker_test" "$retroarch_frames" "$pad_script" "$pad_monitor" "$home_launch" "$game" "$menu_capture" "$retroarch_args" "$relaunch_args" <<'PY'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("dt", "tools/deploy-title.py")
 dt = importlib.util.module_from_spec(spec); spec.loader.exec_module(dt)
@@ -339,8 +347,10 @@ with connect(**dt.load_settings()) as ftp:
             else:
                 upload_atomic(ftp, Path(f"dist/{sys.argv[1]}/eboot.bin"), f"/data/homebrew/{sys.argv[1]}/{sys.argv[8]}")
                 print(f"    uploaded a copy of this build's eboot.bin to /app0/{sys.argv[8]}")
-        ftp.storbinary(f"STOR {control}", io.BytesIO(f"{sys.argv[5]} {sys.argv[6]}{image}\n".encode()))
+        ftp.storbinary(f"STOR {control}", io.BytesIO(f"{sys.argv[5]} {sys.argv[6]}{image}\n{sys.argv[20]}".encode()))
         print(f"    armed relaunch test: {sys.argv[5]} restarts, run {sys.argv[6]}{image}")
+        if sys.argv[20]:
+            print(f"    each restart carries: {sys.argv[20].splitlines()}")
     control = f"/data/homebrew/{sys.argv[1]}/display-modes-test.txt"
     remove_if_present(ftp, control)
     if int(sys.argv[7]):

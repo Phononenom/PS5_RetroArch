@@ -8,17 +8,20 @@
 
 #ifdef __cplusplus
 #include <string>
+#include <vector>
 
 namespace ps5::relaunch
 {
 /* "<count> <run id> [image]": restart the title <count> times (1 to 20) under one
  * run id (letters, digits, '-' and '_'), through the image named, a path in /app0,
- * or the title's own eboot.bin when none is. */
+ * or the title's own eboot.bin when none is. Each line after the first is one more
+ * argument for the restarts (at most 8, printable, under 256 bytes). */
 struct Arm
 {
     unsigned count = 0;
     std::string run;
     std::string image;
+    std::vector<std::string> arguments;
 };
 
 struct Paths

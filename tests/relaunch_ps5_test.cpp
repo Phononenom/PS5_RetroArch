@@ -24,6 +24,7 @@ enum class Exec
 Exec exec_mode = Exec::replace;
 int exec_calls = 0;
 std::string exec_path, exec_argument;
+std::vector<std::string> exec_arguments;
 std::vector<std::string> marks;
 
 std::string slurp(const std::string &path)
@@ -79,7 +80,10 @@ extern "C" int sceSystemServiceLoadExec(const char *path, const char *const *arg
     exec_calls++;
     exec_path = path;
     exec_argument = argv && argv[0] ? argv[0] : "";
-    assert(argv && argv[0] && !argv[1]);
+    assert(argv && argv[0]);
+    exec_arguments.assign(argv, argv + 1);
+    for (const char *const *at = argv + 1; *at; at++)
+        exec_arguments.emplace_back(*at);
     if (exec_mode == Exec::replace)
         throw Replaced{};
     return exec_mode == Exec::refuse ? static_cast<int>(0x80020002u) : 0;
@@ -128,7 +132,7 @@ int main(int argc, char **argv)
     arm(paths, "3 chain-1\n");
     assert(launch(paths, {""}, continued));
     assert(exec_calls == 1 && exec_path == "/app0/eboot.bin" &&
-           exec_argument == "--ps5-relaunch=1");
+           exec_argument == "--ps5-relaunch=1" && exec_arguments.size() == 1);
     assert(launch(paths, {"--ps5-relaunch=1"}, continued) && exec_argument == "--ps5-relaunch=2");
     // A restart whose arguments were lost still counts from the file; the last
     // one finds its token after another argument.
@@ -192,6 +196,23 @@ int main(int argc, char **argv)
     assert(text.find("\"argv\":[\"eboot\",\"quote\\\"back\\\\slash\",\"tab\\u0009here\"]") !=
            std::string::npos);
     assert(!launch(paths, {"--ps5-relaunch=1"}, continued) && !continued);
+
+    // Arguments for the restarts, one a line after the first: each restart carries them
+    // after its generation (a home screen forwarder's here). A bad line arms nothing.
+    arm(paths, "1 forward\n--rom\r\nsnes/Game (USA).zip\n\n--core\nsnes9x\n");
+    assert(launch(paths, {""}, continued));
+    assert((exec_arguments == std::vector<std::string>{"--ps5-relaunch=1", "--rom",
+                                                       "snes/Game (USA).zip", "--core", "snes9x"}));
+    assert(!launch(paths, {"--ps5-relaunch=1", "--rom", "snes/Game (USA).zip", "--core", "snes9x"},
+                   continued) &&
+           !continued && !exists(paths.arm));
+    const int before_bad_arguments = exec_calls;
+    for (const char *bad : {"1 r\nok\nbad\ttab", "1 r\n1\n2\n3\n4\n5\n6\n7\n8\n9"})
+    {
+        arm(paths, bad);
+        assert(!launch(paths, {""}, continued) && !continued && !exists(paths.arm));
+    }
+    assert(exec_calls == before_bad_arguments);
 
     // A record that cannot be written never restarts.
     const int calls = exec_calls;
