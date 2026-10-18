@@ -5,10 +5,8 @@ import http.client
 import json
 import os
 import shutil
-import socket
 import subprocess
 import tempfile
-import time
 import unittest
 
 import sys
@@ -43,17 +41,7 @@ class Server:
         subprocess.check_output(['bash', 'tools/build-webui-update.sh', 'host'], cwd=ROOT, text=True)
         self.binary = root.parent / 'server'
         webui_build.build(self.binary, 'tests/webui_server_main.cpp', flags=('-O1',))
-        with socket.socket() as s:
-            s.bind(('127.0.0.1', 0)); self.port = s.getsockname()[1]
-        self.process = subprocess.Popen([str(self.binary), str(root), str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(100):
-            try:
-                with socket.create_connection(('127.0.0.1', self.port), timeout=.1): break
-            except OSError:
-                if self.process.poll() is not None: raise RuntimeError('HTTP server exited')
-                time.sleep(.02)
-        self.token = ''
-        self.token = self.json('GET', '/api/status')[1]['token']
+        self.process, self.port, self.token = webui_build.start(self.binary, root)
 
     def request(self, method, path, token=None):
         conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)

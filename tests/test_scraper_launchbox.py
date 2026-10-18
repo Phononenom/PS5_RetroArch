@@ -140,18 +140,9 @@ class LaunchBox(unittest.TestCase):
         self.start_server()
 
     def start_server(self):
-        self.port = base.free_port()
         env = {**os.environ, 'PS5_SCRAPER_LAUNCHBOX_BASE': f'http://127.0.0.1:{self.source.server_port}',
                'PS5_SCRAPER_LIBRETRO_BASE': f'http://127.0.0.1:{self.libretro.server_port}'}
-        self.server = subprocess.Popen([str(self.binary), str(self.root), str(self.port)], env=env,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(200):
-            try:
-                self.token = json.loads(self.request('GET', '/api/status')[1])['token']
-                return
-            except OSError:
-                time.sleep(0.02)
-        raise RuntimeError('the server did not start')
+        self.server, self.port, self.token = webui_build.start(self.binary, self.root, env)
 
     def tearDown(self):
         if self.server.poll() is None:

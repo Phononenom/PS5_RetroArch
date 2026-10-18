@@ -3,10 +3,8 @@ the native server, then the files on disk compared with what the page made."""
 from pathlib import Path
 import os
 import shutil
-import socket
 import subprocess
 import tempfile
-import time
 import unittest
 
 import sys
@@ -38,11 +36,8 @@ class TransferBrowser(unittest.TestCase):
             shutil.copytree(ROOT / 'webui', root / 'webui', dirs_exist_ok=True)
             binary = Path(temp) / 'server'
             webui_build.build(binary, 'tests/webui_server_main.cpp', flags=('-O1',))
-            with socket.socket() as s:
-                s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]
-            server = subprocess.Popen([str(binary), str(root), str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            server, port, _ = webui_build.start(binary, root)
             try:
-                time.sleep(0.5)
                 try:
                     run = subprocess.run(['node', 'tests/webui_transfer_browser.cjs'], cwd=ROOT, capture_output=True, text=True, timeout=600,
                                          env={**os.environ, 'PLAYWRIGHT_PATH': PLAYWRIGHT, 'WEBUI_TEST_URL': f'http://127.0.0.1:{port}'})

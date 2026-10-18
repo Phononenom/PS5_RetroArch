@@ -30,18 +30,7 @@ class WebUI(unittest.TestCase):
         (cls.root / 'config/retroarch.cfg').write_bytes(cls.original)
         cls.binary = cls.root / 'server'
         webui_build.build(cls.binary, 'tests/webui_server_main.cpp')
-        with socket.socket() as s:
-            s.bind(('127.0.0.1', 0)); cls.port = s.getsockname()[1]
-        cls.process = subprocess.Popen([str(cls.binary), str(cls.root), str(cls.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(100):
-            try:
-                with socket.create_connection(('127.0.0.1', cls.port), timeout=.1): break
-            except OSError:
-                if cls.process.poll() is not None: raise RuntimeError('HTTP server exited')
-                time.sleep(.02)
-        else: raise RuntimeError('HTTP server did not start')
-        _, _, body = cls.request('GET', '/api/status')
-        cls.token = json.loads(body)['token']
+        cls.process, cls.port, cls.token = webui_build.start(cls.binary, cls.root)
 
     @classmethod
     def tearDownClass(cls):
@@ -180,14 +169,8 @@ class WebUI(unittest.TestCase):
             self.assertEqual(self.request('POST', endpoint, (key + '=chosen').encode(),
                              {'X-RetroArch-Revision': current['revision']})[0], 200)
         self.process.terminate(); self.process.wait(timeout=5)
-        self.__class__.process = subprocess.Popen([str(self.binary), str(self.root), str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(100):
-            try:
-                status, _, body = self.request('GET', '/api/status')
-                if status == 200: break
-            except OSError: pass
-            time.sleep(.02)
-        self.__class__.token = json.loads(body)['token']
+        cls = self.__class__
+        cls.process, cls.port, cls.token = webui_build.start(self.binary, self.root)
         self.assertEqual((self.root / 'config/Fresh Core/Fresh Core.opt').read_text(), 'fresh_resolution = "1"\n')
         self.assertFalse((self.root / 'config/webui-cores/Fresh Core.opt').exists())
         for core in ('PPSSPP', 'dolphin-emu'):
@@ -321,15 +304,7 @@ class WebUI(unittest.TestCase):
         (profile / 'Example Core.opt').write_bytes(original)
         cls = self.__class__
         cls.process.terminate(); cls.process.wait(timeout=5)
-        cls.process = subprocess.Popen([str(cls.binary), str(cls.root), str(cls.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(100):
-            try:
-                status, _, body = cls.request('GET', '/api/status')
-                if status == 200: break
-            except OSError: pass
-            time.sleep(.02)
-        else: self.fail('Server did not restart')
-        cls.token = json.loads(body)['token']
+        cls.process, cls.port, cls.token = webui_build.start(cls.binary, cls.root)
         self.assertIn(b'example_resolution = "4x"', (profile / 'Example Core.opt').read_bytes())
         self.assertIn(b'example_filter = "nearest"', (profile / 'Example Core.opt').read_bytes())
         self.assertIn(b'video_vsync = "false"', (profile / 'Example Core.cfg').read_bytes())
