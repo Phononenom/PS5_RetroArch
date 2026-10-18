@@ -382,6 +382,12 @@ To include the optional melonDS DS core, build with
 and the software renderer with a native-memory JIT; DeSmuME remains available.
 `bash tools/build-melondsds.sh` builds and ABI-checks the core by itself.
 
+To include the optional SwanStation core, build with
+`PS5_WITH_SWANSTATION=1 bash tools/build-title.sh`. It uses pinned upstream sources,
+Vulkan and the x64 recompiler, with platform changes adapted from AngelXex's
+SwanStationPS5; Beetle PSX HW remains the PlayStation default.
+`bash tools/build-swanstation.sh` builds and ABI-checks the core by itself.
+
 The `ps5` microphone driver is the default. A core hears the DualSense microphone
 only while it turns its microphone on (melonDS DS while its microphone button is
 held, its default), the DualSense mute button silences it, and **Settings → Audio →
