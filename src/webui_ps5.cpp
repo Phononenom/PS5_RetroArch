@@ -7,6 +7,8 @@
 #include "webui_transfer.h"
 #include "scraper.h"
 #include "ps5_forwarders.h"
+#include "ps5_smb.h"
+#include "scraper_json.h"
 #include "ps5_frontend_choice.h"
 #include "../vendor/retroarch/libretro-common/include/libretro.h"
 #include <microhttpd.h>
@@ -2158,10 +2160,131 @@ MHD_Result forwarders_route(MHD_Connection *c, const std::string &url, const std
     }
     return error(c, 404, "This page was not found.");
 }
+// The SMB page's server (src/ps5_smb.h): saved in config/smb.cfg, readable only by the
+// title. The password is sent in a body, kept on the console and never answered back.
+std::string smb_file()
+{
+    return root_path + "/config/smb.cfg";
+}
+std::string smb_json(const ps5_smb_config &saved)
+{
+    return std::string("{\"server\":") + quote(saved.server) + ",\"share\":" + quote(saved.share) +
+           ",\"folder\":" + quote(saved.folder) + ",\"user\":" + quote(saved.user) +
+           ",\"workgroup\":" + quote(saved.workgroup) +
+           ",\"password\":" + (saved.password[0] ? "true" : "false") + '}';
+}
+// The server a request names. An empty password with the saved server and user is the
+// saved password, so a page that never sees it can test and save again.
+bool smb_request(const std::string &body, ps5_smb_config &out, std::string &why)
+{
+    const ps5_scraper::Json value = ps5_scraper::Json::parse(body);
+    if (value.kind != ps5_scraper::Json::object)
+    {
+        why = "The server's details did not arrive. Try again.";
+        return false;
+    }
+    ps5_smb_config saved;
+    ps5_smb_config_load(smb_file().c_str(), &saved);
+    out = ps5_smb_config{};
+    struct Field
+    {
+        const char *key, *label;
+        char *to;
+        size_t size;
+    } fields[] = {{"server", "server", out.server, sizeof out.server},
+                  {"share", "share", out.share, sizeof out.share},
+                  {"folder", "folder", out.folder, sizeof out.folder},
+                  {"user", "user name", out.user, sizeof out.user},
+                  {"password", "password", out.password, sizeof out.password},
+                  {"workgroup", "workgroup", out.workgroup, sizeof out.workgroup}};
+    for (const Field &field : fields)
+    {
+        std::string text = value[field.key].str();
+        if (std::string(field.key) != "password")
+            text = trim(text);
+        // config/smb.cfg holds each value in quotes, one a line.
+        if (text.size() >= field.size || text.find_first_of("\"\r\n") != std::string::npos)
+        {
+            why = std::string("The ") + field.label +
+                  " is too long or holds a quote or a line break.";
+            return false;
+        }
+        std::snprintf(field.to, field.size, "%s", text.c_str());
+    }
+    std::string folder = out.folder;
+    std::replace(folder.begin(), folder.end(), '\\', '/');
+    while (!folder.empty() && folder.front() == '/')
+        folder.erase(0, 1);
+    while (!folder.empty() && folder.back() == '/')
+        folder.pop_back();
+    if (("/" + folder + "/").find("/../") != std::string::npos ||
+        out.share[std::strcspn(out.share, "/\\")] != '\0')
+    {
+        why = "Choose a share and a folder inside it.";
+        return false;
+    }
+    std::snprintf(out.folder, sizeof out.folder, "%s", folder.c_str());
+    if (!out.password[0] && out.user[0] && !std::strcmp(out.server, saved.server) &&
+        !std::strcmp(out.user, saved.user))
+        std::snprintf(out.password, sizeof out.password, "%s", saved.password);
+    if (!out.user[0])
+        out.password[0] = '\0'; // the guest account has none
+    return true;
+}
+void smb_add_share(const char *name, void *data)
+{
+    std::string &list = *static_cast<std::string *>(data);
+    list += (list.size() > 1 ? "," : "") + quote(name);
+}
+MHD_Result smb_route(MHD_Connection *c, const std::string &url, const std::string &method,
+                     Request &r)
+{
+    ps5_smb_config server;
+    std::string why;
+    char reason[256] = "";
+    if (method == "GET" && url == "/api/smb")
+    {
+        ps5_smb_config_load(smb_file().c_str(), &server);
+        return respond(c, 200, smb_json(server));
+    }
+    if (method == "POST" && url == "/api/smb/shares")
+    {
+        if (!smb_request(r.body, server, why))
+            return error(c, 400, why.c_str());
+        std::string list = "[";
+        if (ps5_smb_shares(&server, smb_add_share, &list, reason, sizeof reason) < 0)
+            return error(c, 400, reason);
+        return respond(c, 200, "{\"shares\":" + list + "]}");
+    }
+    if (method == "POST" && url == "/api/smb")
+    {
+        if (!smb_request(r.body, server, why))
+            return error(c, 400, why.c_str());
+        if (!ps5_smb_check(&server, reason, sizeof reason))
+            return error(c, 400, reason);
+        if (!write_config(smb_file(), {{"smb_server", server.server},
+                                       {"smb_share", server.share},
+                                       {"smb_folder", server.folder},
+                                       {"smb_user", server.user},
+                                       {"smb_password", server.password},
+                                       {"smb_workgroup", server.workgroup}}))
+            return error(c, 500, "The server could not be saved. Try again.");
+        return respond(c, 200, smb_json(server));
+    }
+    if (method == "DELETE" && url == "/api/smb")
+    {
+        if (unlink(smb_file().c_str()) != 0 && errno != ENOENT)
+            return error(c, 500, "The server could not be forgotten. Try again.");
+        return respond(c, 200, smb_json(ps5_smb_config{}));
+    }
+    return error(c, 404, "This page was not found.");
+}
 MHD_Result route(MHD_Connection *c, const std::string &url, const std::string &method, Request &r)
 {
     if (url.rfind("/api/forwarders", 0) == 0)
         return forwarders_route(c, url, method, r);
+    if (url == "/api/smb" || url.rfind("/api/smb/", 0) == 0)
+        return smb_route(c, url, method, r);
     if (method == "GET" && url == "/api/status")
     {
         struct statvfs fs{};
@@ -2256,6 +2379,7 @@ MHD_Result route(MHD_Connection *c, const std::string &url, const std::string &m
         {"/icons.js", "text/javascript; charset=utf-8"},
         {"/add-game.js", "text/javascript; charset=utf-8"},
         {"/forwarders.js", "text/javascript; charset=utf-8"},
+        {"/smb.js", "text/javascript; charset=utf-8"},
         {"/assets/fluent/LICENSE", "text/plain; charset=utf-8"},
         {"/assets/fluent/arrow-square-down.svg", "image/svg+xml"},
         {"/assets/fluent/arrow-sync.svg", "image/svg+xml"},

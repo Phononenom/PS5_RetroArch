@@ -157,7 +157,26 @@ int main(int argc, char **argv)
     assert(frontend_ctx_ps5.parse_drive_list(&list, false) == 0);
     assert((root_paths == std::vector<std::string>{"/app0", "/mnt/usb0"}));
     assert((root_names == std::vector<std::string>{"INTERNAL", "USB 0"}));
+    // SMB, after them, once the WebUI saved a server and share: the share's folder.
+    std::ofstream(fixture + "/app0/config/smb.cfg")
+        << "smb_server = \"192.0.2.10\"\nsmb_share = \"share\"\nsmb_folder = "
+           "\"Games/Homebrew\"\n"
+           "smb_user = \"\"\nsmb_password = \"\"\nsmb_workgroup = \"\"\n";
+    root_paths.clear();
+    root_names.clear();
+    list = {};
+    assert(frontend_ctx_ps5.parse_drive_list(&list, true) == 0);
+    assert((root_paths == std::vector<std::string>{"/app0", "/mnt/usb0",
+                                                   "smb://192.0.2.10/share/Games/Homebrew"}));
+    assert((root_names == std::vector<std::string>{"INTERNAL", "USB 0", "SMB"}));
+    // no share saved: no SMB
+    std::ofstream(fixture + "/app0/config/smb.cfg") << "smb_server = \"192.0.2.10\"\n";
+    root_paths.clear();
+    root_names.clear();
+    list = {};
+    assert(frontend_ctx_ps5.parse_drive_list(&list, true) == 0);
+    assert((root_names == std::vector<std::string>{"INTERNAL", "USB 0"}));
     frontend_ctx_ps5.init(nullptr); // the startup summary walks every root
     std::puts("frontend_ps5: config seed/preservation, directories, argv, the INTERNAL and "
-              "EXTERNAL roots, and the mounted storage roots PASS");
+              "EXTERNAL roots, the mounted storage roots and SMB PASS");
 }

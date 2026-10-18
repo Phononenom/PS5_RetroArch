@@ -17,7 +17,8 @@ update=$(bash "$root/tools/build-webui-update.sh" ps5)
 # has the same names over other structures, and is left out below.
 bash "$root/tools/build-curl.sh" >/dev/null
 curl="$root/.deps/native/curl-ps5"
-includes=(-I"$build" -I"$curl/include" -I"$root/src" -I"$root/.deps/webui/libmicrohttpd-1.0.10/src/include"
+smb2=$(bash "$root/tools/build-libsmb2.sh" ps5)
+includes=(-I"$build" -I"$curl/include" -I"$smb2/include" -I"$root/src" -I"$root/.deps/webui/libmicrohttpd-1.0.10/src/include"
     -I"$root/.deps/native/zlib/zlib-1.3.2" -I"$root/.deps/native/zlib/zlib-1.3.2/contrib/minizip")
 # ScreenScraper's developer account: read from the git-ignored .env
 # (PS5_SCREENSCRAPER_DEVID, PS5_SCREENSCRAPER_DEVPASSWORD) into a header under build/
@@ -62,14 +63,17 @@ for source in daemon/webui_daemon src/webui_ps5 src/webui_transfer src/webui_upd
     objects+=("$build/${source##*/}.o")
 done
 # The shared game library (src/ps5_library.c), which the scraper reads, as every frontend.
-"$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Werror -c "$root/src/ps5_library.c" -o "$build/ps5_library.o"
-objects+=("$build/ps5_library.o")
+for source in ps5_library ps5_smb; do
+    "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Werror -I"$smb2/include" -c "$root/src/$source.c" \
+        -o "$build/$source.o"
+    objects+=("$build/$source.o")
+done
 # The daemon's own files are 0777, as the title's (daemon/webui_daemon.cpp).
 # The updater's zip reading only, from libupdate.a (its SHA-256 is mbedTLS 3.6's).
 update_build=$(dirname "$update")
 "$sdk/bin/prospero-clang++" -o "$build/ps5-retroarch-webui.elf" "${objects[@]}" "$http" \
     "$update_build/ioapi.o" "$update_build/unzip.o" \
-    "$curl/lib/libcurl.a" "$curl/lib/libmbedtls.a" "$curl/lib/libmbedx509.a" "$curl/lib/libmbedcrypto.a" \
+    "$smb2/lib/libsmb2.a" "$curl/lib/libcurl.a" "$curl/lib/libmbedtls.a" "$curl/lib/libmbedx509.a" "$curl/lib/libmbedcrypto.a" \
     "$root/.deps/native/zlib/root/usr/lib/libz.a" \
     -Wl,--wrap=mkdir -Wl,--wrap=open -Wl,--wrap=fopen -lSceNet
 printf '%s\n' "$build/ps5-retroarch-webui.elf"

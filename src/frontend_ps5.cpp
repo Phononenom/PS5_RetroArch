@@ -9,8 +9,10 @@ extern "C"
 #include <lists/file_list.h>
 #include <menu/menu_entries.h>
 }
+#include "ps5_smb.h"
 #include <cerrno>
 #include <cstdio>
+#include <climits>
 #include <cstring>
 #include <ps5platform/libc.h>
 #include <initializer_list>
@@ -41,6 +43,9 @@ constexpr Root storage_roots[] = {{"/mnt/usb0", "USB 0"},      {"/mnt/usb1", "US
                                   {"/mnt/usb6", "USB 6"},      {"/mnt/usb7", "USB 7"},
                                   {"/mnt/ext0", "EXTENDED 0"}, {"/mnt/ext1", "EXTENDED 1"}};
 constexpr Root external_root{"/mnt", "EXTERNAL"};
+// Last, SMB: the shared folder the WebUI's SMB page saved (src/ps5_smb.h), its share
+// and folder on the server, read through RetroArch's VFS (src/ps5_smb_vfs.c).
+constexpr const char *smb_config = "/app0/config/smb.cfg";
 
 // Whether a directory opens, and how many entries it holds besides . and ..
 bool opens(const char *path, size_t *entries = nullptr, int *error = nullptr)
@@ -201,6 +206,10 @@ int drives(void *data, bool content)
         }
     if (!any)
         add(external_root);
+    ps5_smb_config smb{};
+    char smb_path[PATH_MAX];
+    if (ps5_smb_config_load(smb_config, &smb) && ps5_smb_root(&smb, smb_path, sizeof(smb_path)))
+        add(Root{smb_path, "SMB"});
     return 0;
 }
 } // namespace

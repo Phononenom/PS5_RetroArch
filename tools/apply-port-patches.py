@@ -5119,6 +5119,214 @@ EDITS += [('retroarch.c',
   'patches/series, 0132: frame generation off presents each game frame once')]
 
 
+# The SMB share the WebUI saves (patches/series, 0136): smb:// paths in RetroArch's VFS go to
+# src/ps5_smb_vfs.c, so the file browser lists the share and a core that reads through the
+# VFS streams from it; a core that opens paths itself gets a local copy (task_content.c).
+SMB = 'patches/series, 0136'
+VFS = 'libretro-common/vfs/vfs_implementation.c'
+EDITS += [
+    ('libretro-common/include/vfs/vfs.h',
+     '   VFS_SCHEME_CDROM,\n   VFS_SCHEME_SAF\n};',
+     '   VFS_SCHEME_CDROM,\n   VFS_SCHEME_SAF,\n   /* ' + SMB + ': the WebUI\'s SMB share (src/ps5_smb_vfs.c). */\n'
+     '   VFS_SCHEME_SMB\n};',
+     SMB + ': the WebUI\'s SMB share'),
+    ('libretro-common/include/vfs/vfs.h',
+     '   unsigned hints;\n   enum vfs_scheme scheme;\n};',
+     '   unsigned hints;\n   enum vfs_scheme scheme;\n   void *smb; /* ' + SMB + ': src/ps5_smb_vfs.c\'s file */\n};',
+     SMB + ': src/ps5_smb_vfs.c\'s file'),
+    (VFS,
+     '#define RFILE_HINT_UNBUFFERED (1 << 8)\n',
+     '/* ' + SMB + ': smb:// is the SMB share the WebUI saved, read-only (src/ps5_smb_vfs.h). */\n'
+     '#define PS5_SMB_PATH(path) ((path) && strncmp((path), "smb://", 6) == 0)\n'
+     'void *ps5_smb_open(const char *url, unsigned mode, int64_t *size);\n'
+     'int64_t ps5_smb_read(void *file, void *buffer, uint64_t length);\n'
+     'int64_t ps5_smb_seek(void *file, int64_t offset, int whence);\n'
+     'int64_t ps5_smb_tell(void *file);\n'
+     'void ps5_smb_close(void *file);\n'
+     'int ps5_smb_stat(const char *url, int64_t *size);\n'
+     'void *ps5_smb_opendir(const char *url);\n'
+     'bool ps5_smb_readdir(void *dir);\n'
+     'const char *ps5_smb_dirent_name(void *dir);\n'
+     'bool ps5_smb_dirent_is_dir(void *dir);\n'
+     'void ps5_smb_closedir(void *dir);\n\n'
+     '#define RFILE_HINT_UNBUFFERED (1 << 8)\n',
+     SMB + ': smb:// is the SMB share the WebUI saved'),
+    (VFS,
+     'int64_t retro_vfs_file_seek_internal(\n      libretro_vfs_implementation_file *stream,\n'
+     '      int64_t offset, int whence)\n{\n   int64_t val;\n\n   if (!stream)\n      return -1;\n',
+     'int64_t retro_vfs_file_seek_internal(\n      libretro_vfs_implementation_file *stream,\n'
+     '      int64_t offset, int whence)\n{\n   int64_t val;\n\n   if (!stream)\n      return -1;\n'
+     '   if (stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (seek) */\n'
+     '      return ps5_smb_seek(stream->smb, offset, whence);\n',
+     SMB + ' (seek)'),
+    (VFS,
+     '   stream->scheme                 = VFS_SCHEME_NONE;\n',
+     '   stream->scheme                 = VFS_SCHEME_NONE;\n'
+     '   stream->smb                    = NULL;\n'
+     '   /* ' + SMB + ' (open): a file of the SMB share, or no file. */\n'
+     '   if (PS5_SMB_PATH(path))\n'
+     '   {\n'
+     '      if (!(stream->smb = ps5_smb_open(path, mode, &stream->size)))\n'
+     '      {\n'
+     '         free(stream);\n'
+     '         return NULL;\n'
+     '      }\n'
+     '      stream->scheme    = VFS_SCHEME_SMB;\n'
+     '      stream->orig_path = strdup(path);\n'
+     '      return stream;\n'
+     '   }\n',
+     SMB + ' (open)'),
+    (VFS,
+     'int retro_vfs_file_close_impl(libretro_vfs_implementation_file *stream)\n{\n   if (!stream)\n      return -1;\n',
+     'int retro_vfs_file_close_impl(libretro_vfs_implementation_file *stream)\n{\n   if (!stream)\n      return -1;\n'
+     '   if (stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (close) */\n'
+     '   {\n'
+     '      ps5_smb_close(stream->smb);\n'
+     '      free(stream->orig_path);\n'
+     '      free(stream);\n'
+     '      return 0;\n'
+     '   }\n',
+     SMB + ' (close)'),
+    (VFS,
+     'int retro_vfs_file_error_impl(libretro_vfs_implementation_file *stream)\n{\n',
+     'int retro_vfs_file_error_impl(libretro_vfs_implementation_file *stream)\n{\n'
+     '   if (stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (error): a failed read says so */\n'
+     '      return 0;\n',
+     SMB + ' (error)'),
+    (VFS,
+     'int64_t retro_vfs_file_truncate_impl(libretro_vfs_implementation_file *stream, int64_t len)\n{\n',
+     'int64_t retro_vfs_file_truncate_impl(libretro_vfs_implementation_file *stream, int64_t len)\n{\n'
+     '   if (stream && stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (truncate): read-only */\n'
+     '      return -1;\n',
+     SMB + ' (truncate)'),
+    (VFS,
+     'int64_t retro_vfs_file_tell_impl(libretro_vfs_implementation_file *stream)\n{\n   int64_t val;\n\n'
+     '   if (!stream)\n      return -1;\n',
+     'int64_t retro_vfs_file_tell_impl(libretro_vfs_implementation_file *stream)\n{\n   int64_t val;\n\n'
+     '   if (!stream)\n      return -1;\n'
+     '   if (stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (tell) */\n'
+     '      return ps5_smb_tell(stream->smb);\n',
+     SMB + ' (tell)'),
+    (VFS,
+     'int64_t retro_vfs_file_read_impl(libretro_vfs_implementation_file *stream,\n      void *s, uint64_t len)\n{\n'
+     '   if (!stream || !s)\n      return -1;\n',
+     'int64_t retro_vfs_file_read_impl(libretro_vfs_implementation_file *stream,\n      void *s, uint64_t len)\n{\n'
+     '   if (!stream || !s)\n      return -1;\n'
+     '   if (stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (read) */\n'
+     '      return ps5_smb_read(stream->smb, s, len);\n',
+     SMB + ' (read)'),
+    (VFS,
+     'int64_t retro_vfs_file_write_impl(libretro_vfs_implementation_file *stream, const void *s, uint64_t len)\n{\n'
+     '   int64_t pos = 0;\n   ssize_t ret = -1;\n\n   if (!stream)\n      return -1;\n',
+     'int64_t retro_vfs_file_write_impl(libretro_vfs_implementation_file *stream, const void *s, uint64_t len)\n{\n'
+     '   int64_t pos = 0;\n   ssize_t ret = -1;\n\n   if (!stream)\n      return -1;\n'
+     '   if (stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (write): read-only */\n'
+     '      return -1;\n',
+     SMB + ' (write)'),
+    (VFS,
+     'int retro_vfs_file_flush_impl(libretro_vfs_implementation_file *stream)\n{\n',
+     'int retro_vfs_file_flush_impl(libretro_vfs_implementation_file *stream)\n{\n'
+     '   if (stream && stream->scheme == VFS_SCHEME_SMB) /* ' + SMB + ' (flush) */\n'
+     '      return 0;\n',
+     SMB + ' (flush)'),
+    (VFS,
+     'int retro_vfs_stat_impl(const char *path, int32_t *size)\n{\n   int ret                   = RETRO_VFS_STAT_IS_VALID;\n\n'
+     '   if (!path || !*path)\n      return 0;\n',
+     'int retro_vfs_stat_impl(const char *path, int32_t *size)\n{\n   int ret                   = RETRO_VFS_STAT_IS_VALID;\n\n'
+     '   if (!path || !*path)\n      return 0;\n'
+     '   if (PS5_SMB_PATH(path)) /* ' + SMB + ' (stat): sizes past 2 GiB read as 2 GiB here */\n'
+     '   {\n'
+     '      int64_t whole = 0;\n'
+     '      ret = ps5_smb_stat(path, &whole);\n'
+     '      if (size)\n'
+     '         *size = whole > INT32_MAX ? INT32_MAX : (int32_t)whole;\n'
+     '      return ret;\n'
+     '   }\n',
+     SMB + ' (stat)'),
+    (VFS,
+     'int retro_vfs_mkdir_impl(const char *dir)\n{\n',
+     'int retro_vfs_mkdir_impl(const char *dir)\n{\n'
+     '   if (PS5_SMB_PATH(dir)) /* ' + SMB + ' (mkdir): read-only */\n'
+     '      return -1;\n',
+     SMB + ' (mkdir)'),
+    (VFS,
+     '#if defined(ANDROID) && defined(HAVE_SAF)\n   libretro_vfs_implementation_saf_dir *saf_directory;\n#endif\n};',
+     '#if defined(ANDROID) && defined(HAVE_SAF)\n   libretro_vfs_implementation_saf_dir *saf_directory;\n#endif\n'
+     '   void *smb; /* ' + SMB + ' (dir): src/ps5_smb_vfs.c\'s listing */\n};',
+     SMB + ' (dir)'),
+    (VFS,
+     '   rdir->orig_path       = strdup(name);\n   if (rdir->orig_path == NULL)\n   {\n      free(rdir);\n      return NULL;\n   }\n',
+     '   rdir->orig_path       = strdup(name);\n   if (rdir->orig_path == NULL)\n   {\n      free(rdir);\n      return NULL;\n   }\n'
+     '   if (PS5_SMB_PATH(name)) /* ' + SMB + ' (opendir) */\n'
+     '   {\n'
+     '      if (!(rdir->smb = ps5_smb_opendir(name)))\n'
+     '      {\n'
+     '         free(rdir->orig_path);\n'
+     '         free(rdir);\n'
+     '         return NULL;\n'
+     '      }\n'
+     '      return rdir;\n'
+     '   }\n',
+     SMB + ' (opendir)'),
+    (VFS,
+     'bool retro_vfs_readdir_impl(libretro_vfs_implementation_dir *rdir)\n{\n',
+     'bool retro_vfs_readdir_impl(libretro_vfs_implementation_dir *rdir)\n{\n'
+     '   if (rdir->smb) /* ' + SMB + ' (readdir) */\n'
+     '      return ps5_smb_readdir(rdir->smb);\n',
+     SMB + ' (readdir)'),
+    (VFS,
+     'const char *retro_vfs_dirent_get_name_impl(libretro_vfs_implementation_dir *rdir)\n{\n',
+     'const char *retro_vfs_dirent_get_name_impl(libretro_vfs_implementation_dir *rdir)\n{\n'
+     '   if (rdir->smb) /* ' + SMB + ' (name) */\n'
+     '      return ps5_smb_dirent_name(rdir->smb);\n',
+     SMB + ' (name)'),
+    (VFS,
+     'bool retro_vfs_dirent_is_dir_impl(libretro_vfs_implementation_dir *rdir)\n{\n',
+     'bool retro_vfs_dirent_is_dir_impl(libretro_vfs_implementation_dir *rdir)\n{\n'
+     '   if (rdir->smb) /* ' + SMB + ' (is_dir) */\n'
+     '      return ps5_smb_dirent_is_dir(rdir->smb);\n',
+     SMB + ' (is_dir)'),
+    (VFS,
+     'int retro_vfs_closedir_impl(libretro_vfs_implementation_dir *rdir)\n{\n   int ret = 0;\n\n   if (!rdir)\n      return -1;\n',
+     'int retro_vfs_closedir_impl(libretro_vfs_implementation_dir *rdir)\n{\n   int ret = 0;\n\n   if (!rdir)\n      return -1;\n'
+     '   if (rdir->smb) /* ' + SMB + ' (closedir) */\n'
+     '   {\n'
+     '      ps5_smb_closedir(rdir->smb);\n'
+     '      free(rdir->orig_path);\n'
+     '      free(rdir);\n'
+     '      return 0;\n'
+     '   }\n',
+     SMB + ' (closedir)'),
+    ('tasks/task_content.c',
+     '            RARCH_LOG("[Content] %s\\n", msg_hash_to_str(\n'
+     '                  MSG_CONTENT_LOADING_SKIPPED_IMPLEMENTATION_WILL_DO_IT));\n',
+     '            /* ' + SMB + ' (content): a core that opens paths itself gets a local copy\n'
+     '             * of a file from the SMB share (src/ps5_smb_vfs.c), removed when the content\n'
+     '             * closes; one that reads through the VFS streams the share\'s. */\n'
+     '            if (   string_starts_with(content_path, "smb://")\n'
+     '                && !runloop_state_get_ptr()->system.supports_vfs)\n'
+     '            {\n'
+     '               extern bool ps5_smb_stage(const char *url, const char *directory,\n'
+     '                     char *path, size_t size);\n'
+     '               char staged[PATH_MAX_LENGTH];\n'
+     '               if (!ps5_smb_stage(content_path, "/app0/smb-cache", staged, sizeof(staged)))\n'
+     '               {\n'
+     '                  char msg[PATH_MAX_LENGTH];\n'
+     '                  snprintf(msg, sizeof(msg), "%s: \\"%s\\". (the copy from the SMB share failed)\\n",\n'
+     '                        msg_hash_to_str(MSG_COULD_NOT_READ_CONTENT_FILE), content_path);\n'
+     '                  *err_string = strdup(msg);\n'
+     '                  return false;\n'
+     '               }\n'
+     '               content_path = content_file_list_append_temporary(\n'
+     '                     p_content->content_list, staged);\n'
+     '               used_vfs_fallback_copy = true;\n'
+     '            }\n'
+     '            RARCH_LOG("[Content] %s\\n", msg_hash_to_str(\n'
+     '                  MSG_CONTENT_LOADING_SKIPPED_IMPLEMENTATION_WILL_DO_IT));\n',
+     SMB + ' (content)'),
+]
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__.splitlines()[2].strip(), file=sys.stderr)

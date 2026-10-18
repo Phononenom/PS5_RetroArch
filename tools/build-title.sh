@@ -298,6 +298,9 @@ webui_update=${webui_update#"$root/"}
 # The WebUI's own process, which stays up across the title's frontend changes
 # (src/webui_link.h): built from the same server and updater, staged in webui/.
 webui_daemon=$(bash "$root/tools/build-webui-daemon.sh")
+# libsmb2: the SMB file browser (patches/series, 0136) and the WebUI's SMB page.
+smb2=$(bash "$root/tools/build-libsmb2.sh" ps5)
+smb2=${smb2#"$root/"}
 python3 "$root/tools/build-lapy.py"
 lapy_daemon="$root/build/lapy/build/owned_root_daemon-service-verified-client/lapy-root-daemon.elf"
 
@@ -321,6 +324,7 @@ inputs += [root / name for name in (
     "build/ra/libretroarch.a", "build/ra-conf/config.h", "tools/build-title.sh",
     "build/core_imports.inc", "tools/build-webui-http.sh", "tools/build-webui-update.sh",
     "build/webui-update-ps5/libupdate.a",
+    ".deps/native/libsmb2-ps5/lib/libsmb2.a",
     "build/webui-mhd-ps5/src/microhttpd/.libs/libmicrohttpd.a",
     # The SDK fork's revision: its platform layer is linked into the title, and
     # a change there alone changes no other input.
@@ -377,14 +381,17 @@ directory_wrap_flags+=" $(bash "$root/tools/path-wrap-flags.sh")"
 # Content Directory (src/platform_wraps.c). tools/build.sh refuses the title
 # should one be imported again.
 directory_wrap_flags+=" --wrap=strcasestr --wrap=mkstemp --wrap=link --wrap=symlink --wrap=readlink --wrap=pathconf"
+# libsmb2's protocol lookup reaches no module either, and its socket I/O and login name
+# stay out of the title's imports (src/platform_wraps.c).
+directory_wrap_flags+=" --wrap=getprotobyname --wrap=readv --wrap=writev --wrap=getlogin_r"
 echo "==> [title] step 2/3: the title"
 # Large frontend/core buffers use mapped memory; wrap all ownership operations.
 PS5_PAYLOAD_SDK="$sdk" \
 PS5_CLANG=/usr/bin/clang \
 PYTHONPATH="$root/tooling/pystub${PYTHONPATH:+:$PYTHONPATH}" \
 APP_DEFINITIONS="${title_definition_names[*]}" \
-APP_INCLUDE_PATHS="third_party build/ra-conf build vendor/retroarch build/ra-conf/libretro-common/include vendor/retroarch/deps vendor/retroarch/deps/stb .deps/webui/libmicrohttpd-1.0.10/src/include .deps/native/zlib/zlib-1.3.2 .deps/native/zlib/zlib-1.3.2/contrib/minizip vendor/retroarch/deps/mbedtls" \
-APP_STATIC_ARCHIVES="build/ra/libretroarch.a $webui_http $webui_update" \
+APP_INCLUDE_PATHS="third_party $smb2/include build/ra-conf build vendor/retroarch build/ra-conf/libretro-common/include vendor/retroarch/deps vendor/retroarch/deps/stb .deps/webui/libmicrohttpd-1.0.10/src/include .deps/native/zlib/zlib-1.3.2 .deps/native/zlib/zlib-1.3.2/contrib/minizip vendor/retroarch/deps/mbedtls" \
+APP_STATIC_ARCHIVES="build/ra/libretroarch.a $webui_http $webui_update $smb2/lib/libsmb2.a" \
 APP_SDK_ARCHIVES="libps5platform.a" \
 APP_VULKAN_ARCHIVES="${vulkan_archives[*]}" \
 APP_EXTRA_OBJECTS="${vulkan_objects[*]}" \

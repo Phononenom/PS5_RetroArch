@@ -10,24 +10,25 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = ['src/webui_ps5.cpp', 'src/webui_transfer.cpp', 'src/webui_update.cpp', 'src/scraper.cpp',
            'src/scraper_http.cpp', 'src/ps5_forwarders.cpp']
-C_SOURCES = ['src/ps5_library.c']
+C_SOURCES = ['src/ps5_library.c', 'src/ps5_smb.c']
 
 
 def build(output, main, defines=(), flags=('-O1', '-g')):
     output = Path(output)
     http = subprocess.check_output(['bash', 'tools/build-webui-http.sh', 'host'], cwd=ROOT, text=True).strip()
     update = subprocess.check_output(['bash', 'tools/build-webui-update.sh', 'host'], cwd=ROOT, text=True).strip()
+    smb2 = subprocess.check_output(['bash', 'tools/build-libsmb2.sh', 'host'], cwd=ROOT, text=True).strip()
     objects = []
     for source in C_SOURCES:
         obj = output.with_name(output.name + '-' + Path(source).stem + '.o')
-        subprocess.run(['cc', '-std=c11', '-D_DEFAULT_SOURCE', *flags, '-c', source, '-o', str(obj)], cwd=ROOT, check=True)
+        subprocess.run(['cc', '-std=c11', '-D_DEFAULT_SOURCE', *flags, '-I' + smb2 + '/include', '-c', source, '-o', str(obj)], cwd=ROOT, check=True)
         objects.append(str(obj))
-    subprocess.run(['c++', '-std=c++17', *flags, '-pthread', '-Isrc',
+    subprocess.run(['c++', '-std=c++17', *flags, '-pthread', '-Isrc', '-I' + smb2 + '/include',
                     '-I' + str(ROOT / '.deps/webui/libmicrohttpd-1.0.10/src/include'),
                     '-I' + str(ROOT / '.deps/native/zlib/zlib-1.3.2/contrib/minizip'),
                     '-I' + str(ROOT / 'vendor/retroarch/deps/mbedtls'),
                     '-DPS5_SCRAPER_CURL',  # the daemon's HTTP client, the host's libcurl
-                    *[f'-D{d}' for d in defines], main, *SOURCES, *objects, http, update, '-lz', '-lcurl',
+                    *[f'-D{d}' for d in defines], main, *SOURCES, *objects, http, update, smb2 + '/lib/libsmb2.a', '-lz', '-lcurl',
                     '-o', str(output)], cwd=ROOT, check=True)
     return output
 

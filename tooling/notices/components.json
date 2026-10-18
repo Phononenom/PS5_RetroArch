@@ -729,6 +729,43 @@
       "modifications": "Unmodified source; static HTTP-only build, following ps5-payload-dev/websrv. Build flags and source checksum in tools/build-webui-http.sh."
     },
     {
+      "id": "libsmb2",
+      "name": "libsmb2 (SMB shares: the file browser's SMB entry and the WebUI's SMB page)",
+      "kind": "code",
+      "always": true,
+      "artifacts": [
+        "eboot.bin",
+        "webui/ps5-retroarch-webui.elf"
+      ],
+      "licence": "LGPL-2.1-or-later",
+      "copyright": [
+        "Copyright (C) 2016 by Ronnie Sahlberg <ronniesahlberg@gmail.com> and the libsmb2 contributors"
+      ],
+      "texts": [
+        {
+          "from": ".deps/native/libsmb2-ps5/share/licenses/libsmb2/COPYING",
+          "to": "COPYING"
+        },
+        {
+          "from": ".deps/native/libsmb2-ps5/share/licenses/libsmb2/LICENCE-LGPL-2.1.txt",
+          "to": "LICENCE-LGPL-2.1.txt",
+          "verbatim": true
+        }
+      ],
+      "source": {
+        "kind": "pin",
+        "file": "tools/build-libsmb2.sh",
+        "var": "revision",
+        "url": "https://github.com/sahlberg/libsmb2/archive/{rev}.tar.gz",
+        "extra": [
+          {
+            "tarball": ".deps/downloads/libsmb2-68f1136e7f6e7d136fd08893dc0028faeb2a120b.tar.gz"
+          }
+        ]
+      },
+      "modifications": "Unmodified source; a static build without Kerberos, GSSAPI or libdcerpc, its resolver calls renamed to ps5_smb_getaddrinfo and ps5_smb_freeaddrinfo for the PS5 (tools/build-libsmb2.sh), at the master revision itsPLK/ps5-pkg-manager runs on the PS5."
+    },
+    {
       "id": "slang-shaders",
       "name": "slang-shaders offline video assets",
       "kind": "assets",

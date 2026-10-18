@@ -15,9 +15,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <stdarg.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <ps5platform/libc.h>
@@ -135,4 +138,79 @@ long __wrap_pathconf(const char *path, int name)
         errno = EINVAL;
         return -1;
     }
+}
+
+/* libsmb2's resolver (src/ps5_smb.c): in a title, getaddrinfo is the platform layer's,
+ * which answers every name with EAI_FAIL, so the SMB server goes through RetroArch's own
+ * resolver (src/net_shims.c: a dotted quad as it is, a name through the console's). */
+int __wrap_getaddrinfo_retro(const char *node, const char *service, struct addrinfo *hints,
+                             struct addrinfo **result);
+void __wrap_freeaddrinfo_retro(struct addrinfo *info);
+
+int ps5_smb_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints,
+                        struct addrinfo **result)
+{
+    struct addrinfo copy;
+    if (hints)
+        copy = *hints;
+    return __wrap_getaddrinfo_retro(node, service, hints ? &copy : NULL, result);
+}
+
+void ps5_smb_freeaddrinfo(struct addrinfo *info)
+{
+    __wrap_freeaddrinfo_retro(info);
+}
+
+/* libsmb2 names TCP with getprotobyname, which reaches no module in a title. */
+struct protoent *__wrap_getprotobyname(const char *name)
+{
+    static char tcp_name[] = "tcp";
+    static char *no_aliases[] = {NULL};
+    static struct protoent tcp = {tcp_name, no_aliases, IPPROTO_TCP};
+    return name && strcmp(name, "tcp") == 0 ? &tcp : NULL;
+}
+
+/* libsmb2's socket I/O and default user name would be the title's first imports of
+ * readv, writev and getlogin_r: none goes to the console, so libsmb2 leaves the import
+ * table as it was. Each vector goes through read() and write(), and there is no login
+ * name (libsmb2 then signs in with the user src/ps5_smb.c sets). */
+ssize_t __wrap_readv(int fd, const struct iovec *vectors, int count)
+{
+    ssize_t total = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (!vectors[i].iov_len)
+            continue;
+        const ssize_t got = read(fd, vectors[i].iov_base, vectors[i].iov_len);
+        if (got < 0)
+            return total ? total : got;
+        total += got;
+        if ((size_t)got < vectors[i].iov_len)
+            break;
+    }
+    return total;
+}
+
+ssize_t __wrap_writev(int fd, const struct iovec *vectors, int count)
+{
+    ssize_t total = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (!vectors[i].iov_len)
+            continue;
+        const ssize_t sent = write(fd, vectors[i].iov_base, vectors[i].iov_len);
+        if (sent < 0)
+            return total ? total : sent;
+        total += sent;
+        if ((size_t)sent < vectors[i].iov_len)
+            break;
+    }
+    return total;
+}
+
+int __wrap_getlogin_r(char *name, size_t size)
+{
+    (void)name;
+    (void)size;
+    return ENXIO;
 }

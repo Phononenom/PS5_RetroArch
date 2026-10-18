@@ -94,13 +94,15 @@ async function reconnect() {
 }
 function pageFromHash() {
   const name = location.hash.slice(1).split('?')[0];
-  return ['content', 'games', 'forwarders', 'media', 'transfers', 'settings'].includes(name) ? name : 'overview';
+  return ['content', 'games', 'forwarders', 'smb', 'media', 'transfers', 'settings'].includes(name) ? name : 'overview';
 }
 function navigate() {
   const page = pageFromHash();
   $$('.page').forEach(node => { node.hidden = node.id !== page; });
   $$('[data-page]').forEach(node => { if (node.dataset.page === page) node.setAttribute('aria-current', 'page'); else node.removeAttribute('aria-current'); });
-  $('#page-title').textContent = { media: 'Download Media', forwarders: 'Game Forwarder' }[page] || page[0].toUpperCase() + page.slice(1);
+  // A phone's navigation row scrolls: the page shown stays in view.
+  $(`.sidebar nav [data-page="${page}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  $('#page-title').textContent = { media: 'Download Media', forwarders: 'Game Forwarder', smb: 'SMB' }[page] || page[0].toUpperCase() + page.slice(1);
   if (page === 'content') loadContent(currentPath);
   if (page === 'games') loadGames();
   if (page === 'media') openMedia();

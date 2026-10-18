@@ -18,10 +18,16 @@ class PlatformPaths(unittest.TestCase):
             platform.mkdir()
             (platform / 'ps5platform').symlink_to(
                 ROOT / '.deps/native/ps5-payload-sdk/target/include/ps5platform')
+            # The SMB root's saved server (src/ps5_smb.c), read through the same fopen.
+            smb2 = subprocess.check_output(['bash', 'tools/build-libsmb2.sh', 'host'], cwd=ROOT,
+                                           text=True).strip()
+            smb = str(Path(td) / 'ps5_smb.o')
+            subprocess.run(['cc', '-std=c11', '-D_DEFAULT_SOURCE', '-O2', '-Wall', '-Werror', f'-I{smb2}/include',
+                            '-c', 'src/ps5_smb.c', '-o', smb], cwd=ROOT, check=True)
             subprocess.run(['c++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror',
                             '-Ivendor/retroarch', '-Ivendor/retroarch/libretro-common/include',
-                            f'-I{platform}',
-                            'tests/frontend_ps5_test.cpp', '-o', binary,
+                            f'-I{platform}', '-Isrc',
+                            'tests/frontend_ps5_test.cpp', smb, f'{smb2}/lib/libsmb2.a', '-lpthread', '-o', binary,
                             *[f'-Wl,--wrap={name}' for name in functions]], cwd=ROOT, check=True)
             subprocess.run([binary, str(Path(td) / 'filesystem')], cwd=ROOT,
                            check=True, timeout=10)

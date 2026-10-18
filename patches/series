@@ -291,3 +291,5 @@
 0134  Native user-routed AudioIn microphone backend (src/microphone_ps5.cpp), the default driver. It captures only while a core has its microphone on (melonDS DS while its microphone button is held, its default), sends silence under the DualSense mute, and keeps PCM only in a bounded in-memory queue; cores use the standard libretro microphone interface.
 
 0135  A microphone read that produces no frames returns silence rather than looping forever on a paused core, a temporarily empty nonblocking device, or a capture failure.
+
+0136  SMB: smb:// paths in RetroArch's VFS are the shared folder the WebUI's SMB page saved (src/ps5_smb.h, src/ps5_smb_vfs.c, libsmb2 from tools/build-libsmb2.sh), read-only and only on the saved server. The file browser lists it under SMB, after INTERNAL and EXTERNAL (src/frontend_ps5.cpp); a core that reads through the VFS streams a file from it, and one that opens paths itself gets a local copy in /app0/smb-cache, removed when the content closes (tasks/task_content.c). After RetroArch's own SMB client (libretro/RetroArch@c68eea5598), which 1.22.2 does not have.
