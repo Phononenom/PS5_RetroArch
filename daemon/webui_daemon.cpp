@@ -14,8 +14,9 @@
  * request is being answered: the title closed. An update the WebUI is asked to
  * install makes every linked program close the title; once none is left, this
  * installs it (ps5_update::install), the way eboot.bin did after RetroArch quit.
- * A stop for the title's close finishes what the Game Forwarder page's tiles left for
- * it: removals and new names or icons (src/ps5_forwarders.h).
+ * What the Game Forwarder page's tiles left for the title's close (removals and new names
+ * or icons, src/ps5_forwarders.h) is done once no program of the title is linked: tried at
+ * once and every few seconds while ShadowMountPlus refuses, and at the stop.
  *
  * Its own record is <title>/webui-daemon.txt (the last run's is webui-daemon.1.txt).
  * tests/test_webui_daemon.py builds it for the host, with its folder, ports and idle
@@ -242,8 +243,9 @@ int main()
     ps5_webui_set_frontend("");
     std::vector<Link> links;
     bool serving = false, stale = false, install_sent = false, installed = false, closed = false;
+    bool tiles_done = false;
     const double started = now_s();
-    double idle_since = started, installed_at = 0, last_serve_try = 0;
+    double idle_since = started, installed_at = 0, last_serve_try = 0, last_tiles = 0;
     unsigned serve_failures = 0;
     /* The WebUI starts on a thread of its own (reading the library and the saved scraping
      * jobs takes seconds): the title's hello is answered meanwhile. 0 idle, 1 starting,
@@ -368,6 +370,16 @@ int main()
             idle_since = 0;
         else if (idle_since == 0)
             idle_since = now;
+        /* What a Game Forwarder tile waits for (a removal, a new name or picture, which
+         * ShadowMountPlus refuses while a game runs): tried once no program of the title is
+         * linked, and every few seconds after, not only at the stop kIdleSeconds later */
+        if (linked)
+            tiles_done = false; /* the page can leave more while the title runs */
+        else if (serving && !tiles_done && now - last_tiles >= 3.0)
+        {
+            last_tiles = now;
+            tiles_done = ps5_webui_finish_forwarders([](const char *line) { say("%s", line); });
+        }
 
         if (start_state == 2 || start_state == 3)
         {
@@ -468,7 +480,7 @@ int main()
         close(listener);
     ps5_webui_stop();
     /* ShadowMountPlus refuses to uninstall while a game runs, and RetroArch is one */
-    if (closed)
+    if (closed && !tiles_done)
         ps5_webui_finish_forwarders([](const char *line) { say("%s", line); });
     say("stopped");
     return 0;

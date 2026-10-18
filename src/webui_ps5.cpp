@@ -2703,8 +2703,8 @@ void ps5_webui_stop()
     ps5_scraper::shutdown();
     ps5_update::stop();
 }
-void ps5_webui_finish_forwarders(void (*say)(const char *line))
+bool ps5_webui_finish_forwarders(void (*say)(const char *line))
 {
-    if (!root_path.empty())
-        ps5_forwarders::finish_pending(forwarder_paths(), say);
+    std::lock_guard<std::mutex> guard(state_lock); // the page may be open meanwhile
+    return root_path.empty() || ps5_forwarders::finish_pending(forwarder_paths(), say);
 }

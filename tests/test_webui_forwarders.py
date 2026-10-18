@@ -33,7 +33,8 @@ int main(int argc, char **argv)
     paths.homebrew = argv[1];
     paths.title = argv[2];
     paths.shadowmount_port = static_cast<unsigned short>(std::atoi(argv[3]));
-    ps5_forwarders::finish_pending(paths, [](const char *line) { std::puts(line); });
+    if (ps5_forwarders::finish_pending(paths, [](const char *line) { std::puts(line); }))
+        std::puts("nothing waits");
 }
 '''
 
@@ -224,10 +225,14 @@ class Forwarders(unittest.TestCase):
         self.assertNotIn(str(folder), state['manual'])
         self.assertTrue((folder / 'remove.pending').exists())
         self.assertEqual(next(t for t in self.tiles()['tiles'] if t['id'] == tile_id)['state'], 'removing')
-        self.assertIn(f'forwarder {tile_id}: not removed yet: A game is active (game_active)', self.run_finish())
+        output = self.run_finish()
+        self.assertIn(f'forwarder {tile_id}: not removed yet: A game is active (game_active)', output)
+        self.assertNotIn('nothing waits', output)
         self.assertTrue(folder.exists())
         state['busy'] = False
-        self.assertIn(f'forwarder {tile_id}: removed', self.run_finish())
+        output = self.run_finish()
+        self.assertIn(f'forwarder {tile_id}: removed', output)
+        self.assertIn('nothing waits', output)
         self.assertFalse(folder.exists())
         self.assertFalse(state['games'][tile_id])
         self.assertNotIn(tile_id, [t['id'] for t in self.tiles()['tiles']])
@@ -271,6 +276,7 @@ class Forwarders(unittest.TestCase):
         output = self.run_finish()
         self.assertIn(f'forwarder {tile_id}: launch.elf brought up to this build', output)
         self.assertIn(f'forwarder {tile_id}: installed again with its new name or icon', output)
+        self.assertIn('nothing waits', output)
         self.assertEqual((folder / 'launch.elf').read_bytes(), b'launch payload')
         self.assertFalse((folder / 'refresh.pending').exists())
         self.assertEqual(state['scans'], scans + 1)

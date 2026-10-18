@@ -263,7 +263,7 @@ cartridge or disc, screenshot, title screen or fan art, filling the square or fi
 the system's icon in the bottom right corner if you like. A picture the game has no file for
 yet is greyed out; **Download Media** can find it. Choose **Create tile**, then close
 RetroArch: the tile appears on the home screen. A new name or picture, and a tile you delete,
-reach the home screen the same way, once RetroArch closes.
+reach the home screen the same way, a few seconds after RetroArch closes.
 
 A tile is a small title of its own, `PPSA99170` to `PPSA99269` in `/data/homebrew`, which
 [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus) 1.7 or later installs. The page

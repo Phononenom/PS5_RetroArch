@@ -600,9 +600,10 @@ std::string remove(const Paths &paths, const std::string &id, std::string &why)
     return "removed";
 }
 
-void finish_pending(const Paths &paths, void (*say)(const char *line))
+bool finish_pending(const Paths &paths, void (*say)(const char *line))
 {
     char line[512];
+    size_t left = 0;
     std::vector<std::string> removals, refreshes;
     for (const auto &id : tile_ids(paths))
     {
@@ -628,14 +629,14 @@ void finish_pending(const Paths &paths, void (*say)(const char *line))
         }
     }
     if (removals.empty() && refreshes.empty())
-        return;
+        return true;
     const Known smp = known(paths);
     if (!smp.answers)
     {
         std::snprintf(line, sizeof line, "forwarders: removals and new names or icons wait: %s",
                       smp.why.c_str());
         say(line);
-        return;
+        return false;
     }
     std::vector<std::string> uninstalled;
     for (const auto &id : removals)
@@ -644,8 +645,11 @@ void finish_pending(const Paths &paths, void (*say)(const char *line))
                                                     "{\"title_id\":" + quote(id) + '}')
                                              : Json::parse("{\"status\":0}");
         if (!succeeded(gone))
+        {
+            ++left;
             std::snprintf(line, sizeof line, "forwarder %s: not removed yet: %s", id.c_str(),
                           failure(gone).c_str());
+        }
         else
         {
             remove_tree(folder_of(paths, id));
@@ -662,13 +666,14 @@ void finish_pending(const Paths &paths, void (*say)(const char *line))
             uninstalled.push_back(id);
         else
         {
+            ++left;
             std::snprintf(line, sizeof line, "forwarder %s: not re-registered yet: %s", id.c_str(),
                           failure(gone).c_str());
             say(line);
         }
     }
     if (uninstalled.empty())
-        return;
+        return left == 0;
     /* the uninstall finishes on its own: then a scan installs each one again */
     for (int wait = 0; wait < 40; ++wait)
     {
@@ -692,5 +697,6 @@ void finish_pending(const Paths &paths, void (*say)(const char *line))
                               : "uninstalled; ShadowMountPlus did not take the scan");
         say(line);
     }
+    return left == 0 && scanned;
 }
 } // namespace ps5_forwarders

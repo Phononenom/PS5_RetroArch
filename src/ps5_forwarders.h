@@ -51,6 +51,7 @@ std::string icon_file(const Paths &paths, const std::string &id);
 /* "removed", "pending" (finished once the title has closed), or "" and why. */
 std::string remove(const Paths &paths, const std::string &id, std::string &why);
 /* Once the title has closed: removals and re-registrations that had to wait, and every
- * tile's app and payload brought up to this build's. say gets one line an action. */
-void finish_pending(const Paths &paths, void (*say)(const char *line));
+ * tile's app and payload brought up to this build's. say gets one line an action. True
+ * once nothing waits any more; false while ShadowMountPlus still refuses (a game runs). */
+bool finish_pending(const Paths &paths, void (*say)(const char *line));
 } // namespace ps5_forwarders

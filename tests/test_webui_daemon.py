@@ -3,18 +3,22 @@ programs as src/webui_link.cpp links, it serves the title's folder, names the fr
 keeps an upload going while the title changes frontend (one program's link closes,
 the next one's opens), refuses another build's programs, and stops once the title has
 closed. Its folder, ports and idle time are the test's."""
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
 import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 import webui_build  # noqa: E402
+from test_webui_forwarders import ShadowMount  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 TITLE = 'PPSA99169'
@@ -49,9 +53,15 @@ class WebuiDaemon(unittest.TestCase):
                           (f'PS5_WEBUI_HOMEBREW="{cls.homebrew}"', f'PS5_WEBUI_LINK_PORT={cls.link_port}',
                            f'PS5_WEBUI_HTTP_PORT={cls.http_port}', f'PS5_WEBUI_IDLE_SECONDS={IDLE}'),
                           ('-O1', '-g', '-Wall', '-Wextra', '-Werror'))
+        # ShadowMountPlus, for the Game Forwarder tiles the daemon finishes (src/ps5_forwarders.h)
+        cls.smp = ThreadingHTTPServer(('127.0.0.1', 0), ShadowMount)
+        cls.smp.state = {'calls': [], 'down': False, 'busy': False, 'scans': 0, 'manual': set(), 'games': {}}
+        threading.Thread(target=cls.smp.serve_forever, daemon=True).start()
 
     @classmethod
     def tearDownClass(cls):
+        cls.smp.shutdown()
+        cls.smp.server_close()
         cls.temp.cleanup()
 
     def setUp(self):
@@ -62,7 +72,8 @@ class WebuiDaemon(unittest.TestCase):
         (self.root / 'webui/index.html').write_text('<!doctype html><title>RetroArch</title>')
         (self.root / 'webui/version.json').write_text('{"build": "one"}\n')
         (self.root / 'sce_sys/param.json').write_text(json.dumps({'titleId': TITLE}))
-        self.daemon = subprocess.Popen([str(self.binary)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.daemon = subprocess.Popen([str(self.binary)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                       env={**os.environ, 'PS5_FORWARDERS_SHADOWMOUNT_PORT': str(self.smp.server_port)})
         self.addCleanup(self.stop)
         self.assertTrue(wait_for(self.listening), 'the daemon did not listen for links')
 
@@ -151,6 +162,31 @@ class WebuiDaemon(unittest.TestCase):
         for line in ('linked: picker', 'unlinked: picker', 'linked: es-de', 'frontend: retroarch',
                      'the title is closed', 'stopped'):
             self.assertIn(line, log)
+
+    def test_a_tile_removal_is_done_as_soon_as_the_title_closes(self):
+        # A Game Forwarder tile deleted while RetroArch ran (src/ps5_forwarders.h): nothing
+        # while a program is linked, the uninstall as soon as none is, before the stop.
+        tile = self.homebrew / 'PPSA99170'
+        self.addCleanup(shutil.rmtree, tile, True)
+        (tile / 'sce_sys').mkdir(parents=True)
+        (tile / 'forward.txt').write_text('--rom\nsnes/Game.zip\n')
+        (tile / 'remove.pending').write_text('')
+        state = self.smp.state
+        state['games']['PPSA99170'] = True
+        calls = len(state['calls'])
+        link, reply = self.hello('retroarch')
+        self.assertEqual(reply, 'ok')
+        self.assertTrue(wait_for(self.serving))
+        time.sleep(1)
+        self.assertTrue(tile.is_dir())
+        self.assertNotIn(('/api/v1/games/uninstall', {'title_id': 'PPSA99170'}), state['calls'][calls:])
+        link.close()
+        closed = time.monotonic()
+        self.assertTrue(wait_for(lambda: not tile.exists(), timeout=IDLE + 10))
+        self.assertLess(time.monotonic() - closed, IDLE - 0.5)
+        self.assertIn(('/api/v1/games/uninstall', {'title_id': 'PPSA99170'}), state['calls'][calls:])
+        self.assertEqual(self.daemon.wait(timeout=IDLE + 10), 0)
+        self.assertIn('forwarder PPSA99170: removed', self.daemon.stderr.read())
 
     def test_other_build_and_other_title(self):
         first, reply = self.hello('picker')
