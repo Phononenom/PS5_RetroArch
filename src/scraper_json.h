@@ -1,6 +1,6 @@
 /* Copyright (C) 2026 Mihawk; SPDX-License-Identifier: GPL-3.0-or-later */
 /* A small JSON reader for the scraper's sources (ScreenScraper answers in JSON): values
- * are read whole into a tree; nothing is written. Malformed input reads as null. */
+ * are read whole into a tree, and dump() writes one back. Malformed input reads as null. */
 #pragma once
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +47,52 @@ struct Json
             return out;
         }
         return "";
+    }
+
+    /* The value as JSON text, for files the WebUI edits (RetroArch's playlists): fields
+     * come out in name order, which RetroArch's reader does not mind. */
+    std::string dump() const
+    {
+        switch (kind)
+        {
+        case boolean:
+            return flag ? "true" : "false";
+        case number:
+            return str();
+        case string:
+        {
+            std::string out = "\"";
+            for (unsigned char c : text)
+                if (c == '"' || c == '\\')
+                    out += '\\', out += char(c);
+                else if (c < 0x20)
+                {
+                    char escaped[8];
+                    std::snprintf(escaped, sizeof escaped, "\\u%04x", c);
+                    out += escaped;
+                }
+                else
+                    out += char(c);
+            return out + '"';
+        }
+        case array:
+        {
+            std::string out = "[";
+            for (const auto &item : items)
+                out += (out.size() > 1 ? "," : "") + item.dump();
+            return out + ']';
+        }
+        case object:
+        {
+            std::string out = "{";
+            for (const auto &field : fields)
+                out += (out.size() > 1 ? "," : "") + Json{string, false, 0, field.first}.dump() +
+                       ':' + field.second.dump();
+            return out + '}';
+        }
+        default:
+            return "null";
+        }
     }
 
     static Json parse(const std::string &input)

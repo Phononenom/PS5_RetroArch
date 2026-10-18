@@ -240,7 +240,8 @@ std::map<std::string, std::string> read_meta(const std::string &path)
 }
 
 /* The scraped fields into a game's list entry: a field ES-DE has is kept, unless it is
- * still the library's default (the name as the label). */
+ * still the library's default (the name as the label) or the owner edited it in the
+ * WebUI, which lists it in "edited" (issue 55: a second rename was dropped). */
 void add_meta(pugi::xml_node node, const char *media, const char *system,
               const struct ps5_library_game &game)
 {
@@ -252,6 +253,10 @@ void add_meta(pugi::xml_node node, const char *media, const char *system,
         {"name", "name"},           {"description", "desc"},    {"developer", "developer"},
         {"publisher", "publisher"}, {"genre", "genre"},         {"players", "players"},
         {"rating", "rating"},       {"released", "releasedate"}};
+    const auto list = meta.find("edited");
+    const std::string edited_list = list == meta.end() ? "" : "," + list->second + ",";
+    const auto edited = [&](const char *name)
+    { return edited_list.find(std::string(",") + name + ",") != std::string::npos; };
     for (const auto &field : fields)
     {
         const auto value = meta.find(field[0]);
@@ -273,7 +278,8 @@ void add_meta(pugi::xml_node node, const char *media, const char *system,
             text = digits + "T000000";
         }
         const std::string current = node.child_value(field[1]);
-        if (current.empty() || (std::strcmp(field[1], "name") == 0 && current == game.label))
+        if (current.empty() || edited(field[0]) ||
+            (std::strcmp(field[1], "name") == 0 && current == game.label))
             set_child(node, field[1], text);
     }
 }

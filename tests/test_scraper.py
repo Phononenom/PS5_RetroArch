@@ -533,6 +533,13 @@ class Scraper(unittest.TestCase):
         self.assertEqual(next(g for system in json.loads(self.request('GET', '/api/library')[1])['systems'] for g in system['games'] if g['path'] == path)['name'], 'My game')
         meta = (self.root / 'library/snes/metadata' / (key + '.meta')).read_text()
         self.assertIn('edited = "name,description,developer,publisher,genre,players,rating,released"', meta)
+        # RetroArch's menus show the playlist's label: the new name reaches it, the other
+        # entries and the playlist's own fields stay (issue 55).
+        playlist = json.loads((self.root / f'playlists/{DB}.lpl').read_text())
+        self.assertEqual(playlist['version'], '1.5')
+        labels = {item['path']: item['label'] for item in playlist['items']}
+        self.assertEqual(labels, {p: 'My game' if p == path else l for l, p in self.games.items()})
+        self.assertEqual({item['core_path'] for item in playlist['items']}, {'DETECT'})
         metadata['rating'] = 'NaN'
         self.assertEqual(self.request('POST', '/api/library/game?' + query, json.dumps(metadata).encode())[0], 400)
         self.assertEqual(rom.read_bytes(), b'replacement')

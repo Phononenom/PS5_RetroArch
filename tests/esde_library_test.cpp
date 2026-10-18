@@ -154,6 +154,21 @@ int main(int argc, char **argv)
         assert(path != "./Gone (USA).zip");
     }
     assert(count == 2 && kept && added);
+    /* A name the owner edited in the WebUI wins over ES-DE's, every time (issue 55). */
+    for (const char *name : {"Jungle Run Two", "Jungle Run, again"})
+    {
+        write_text(media + "/snes/metadata/Jungle Run 2 (USA).meta",
+                   std::string("edited = \"name\"\nname = \"") + name + "\"\n");
+        assert(ps5_esde_write_library_to(&paths, summary, sizeof(summary)) == 2);
+        pugi::xml_document renamed;
+        assert(renamed.load_file((data + "/gamelists/snes/gamelist.xml").c_str()));
+        bool found = false;
+        for (pugi::xml_node game : renamed.child("gameList").children("game"))
+            if (std::string(game.child_value("path")) == "./Jungle Run 2 (USA).zip")
+                found = std::string(game.child_value("name")) == name &&
+                        std::string(game.child_value("favorite")) == "true";
+        assert(found);
+    }
     pugi::xml_document homebrew;
     assert(homebrew.load_file((data + "/gamelists/homebrew/gamelist.xml").c_str()));
     assert(std::string(homebrew.child("gameList").child("game").child_value("path")) ==

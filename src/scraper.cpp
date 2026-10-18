@@ -2793,6 +2793,52 @@ bool game_identity(const std::string &system, const std::string &key, const std:
     return false;
 }
 
+/* Every RetroArch playlist entry for a game's file: edit changes it in place, or
+ * returns false to remove it. A playlist is written only when it held the game; false
+ * when one could not be written. RetroArch's menus read the label (issues 55, 57). */
+bool edit_playlist_entries(const std::string &path, const std::function<bool(Json &)> &edit)
+{
+    const std::string folder = root_path + "/playlists";
+    std::vector<std::string> files;
+    if (DIR *dir = opendir(folder.c_str()))
+    {
+        while (const dirent *entry = readdir(dir))
+        {
+            const std::string name = entry->d_name;
+            if (name.size() > 4 && name.compare(name.size() - 4, 4, ".lpl") == 0)
+                files.push_back(folder + '/' + name);
+        }
+        closedir(dir);
+    }
+    bool ok = true;
+    for (const auto &file : files)
+    {
+        Json playlist = Json::parse(read_text(file));
+        const auto items = playlist.fields.find("items");
+        if (playlist.kind != Json::object || items == playlist.fields.end() ||
+            items->second.kind != Json::array)
+            continue;
+        auto &entries = items->second.items;
+        bool changed = false;
+        for (size_t i = 0; i < entries.size();)
+        {
+            if (entries[i]["path"].str() != path)
+            {
+                ++i;
+                continue;
+            }
+            changed = true;
+            if (edit(entries[i]))
+                ++i;
+            else
+                entries.erase(entries.begin() + long(i));
+        }
+        if (changed && !write_atomic(file, playlist.dump()))
+            ok = false;
+    }
+    return ok;
+}
+
 bool edit_game(const std::string &system, const std::string &key, const std::string &body,
                std::string &why)
 {
@@ -2853,7 +2899,18 @@ bool edit_game(const std::string &system, const std::string &key, const std::str
     meta["edited"] = kinds_text(edited);
     make_folders(library_root() + '/' + system + "/metadata");
     if (write_atomic(meta_path(system, key), fields_text(meta)))
+    {
+        // The new name in RetroArch's menus too (issue 55); the metadata is the record.
+        if (input["name"].kind == Json::string)
+            edit_playlist_entries(game.path,
+                                  [&](Json &entry)
+                                  {
+                                      entry.fields["label"] =
+                                          Json{Json::string, false, 0, meta["name"]};
+                                      return true;
+                                  });
         return true;
+    }
     why = "Details could not be saved. Check console storage.";
     return false;
 }
