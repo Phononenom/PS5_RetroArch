@@ -770,11 +770,16 @@ MHD_Result config_editor(MHD_Connection *c, const std::string &method, const std
             if (out.back() != '[')
                 out += ',';
             const bool secret = secret_setting(entry.first);
+            // A sign-in replaces the RetroAchievements password with its token
+            // (src/ps5_cheevos.c): with a token the account is still saved (issue 58).
+            const auto token = baseline.find("cheevos_token");
+            const bool set =
+                !entry.second.empty() || (entry.first == "cheevos_password" &&
+                                          token != baseline.end() && !token->second.empty());
             out += "{\"key\":" + quote(entry.first) +
                    ",\"value\":" + quote(secret ? std::string() : entry.second) +
                    ",\"kind\":" + quote(setting_kind(entry.first, options)) +
-                   (secret ? std::string(",\"secret\":true,\"set\":") +
-                                 (entry.second.empty() ? "false" : "true")
+                   (secret ? std::string(",\"secret\":true,\"set\":") + (set ? "true" : "false")
                            : std::string()) +
                    '}';
         }

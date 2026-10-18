@@ -82,6 +82,15 @@ class Secrets(unittest.TestCase):
                 kept = (root / 'config/retroarch.cfg').read_text()
                 self.assertNotIn('hunter2', kept)
                 self.assertIn('cheevos_token = "abcdef123456"', kept)
+                # Signed in: the password is gone but the token is kept, so the page still
+                # shows the account as saved (issue 58), and neither is ever sent.
+                raw = call('GET')[1]
+                self.assertNotIn(b'abcdef123456', raw)
+                fields = {s['key']: s for s in json.loads(raw)['settings']}
+                self.assertEqual((fields['cheevos_password']['value'], fields['cheevos_password']['set']), ('', True))
+                (root / 'config/retroarch.cfg').write_text(kept.replace('abcdef123456', ''))
+                fields = {s['key']: s for s in json.loads(call('GET')[1])['settings']}
+                self.assertFalse(fields['cheevos_password']['set'])
             finally:
                 server.stop()
 
