@@ -5,7 +5,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = ['src/webui_ps5.cpp', 'src/webui_transfer.cpp', 'src/webui_update.cpp', 'src/scraper.cpp',
-           'src/scraper_http.cpp']
+           'src/scraper_http.cpp', 'src/ps5_forwarders.cpp']
 C_SOURCES = ['src/ps5_library.c']
 
 

@@ -14,6 +14,8 @@
  * request is being answered: the title closed. An update the WebUI is asked to
  * install makes every linked program close the title; once none is left, this
  * installs it (ps5_update::install), the way eboot.bin did after RetroArch quit.
+ * A stop for the title's close finishes what the Game Forwarder page's tiles left for
+ * it: removals and new names or icons (src/ps5_forwarders.h).
  *
  * Its own record is <title>/webui-daemon.txt (the last run's is webui-daemon.1.txt).
  * tests/test_webui_daemon.py builds it for the host, with its folder, ports and idle
@@ -239,7 +241,7 @@ int main()
     }
     ps5_webui_set_frontend("");
     std::vector<Link> links;
-    bool serving = false, stale = false, install_sent = false, installed = false;
+    bool serving = false, stale = false, install_sent = false, installed = false, closed = false;
     const double started = now_s();
     double idle_since = started, installed_at = 0, last_serve_try = 0;
     unsigned serve_failures = 0;
@@ -448,7 +450,7 @@ int main()
                  now - idle_since >= kIdleSeconds)
         {
             say("no program of the title linked for %.0f s: the title is closed", kIdleSeconds);
-            stop = true;
+            stop = closed = true;
         }
         if (stale && listener >= 0 && !installed)
         {
@@ -465,6 +467,9 @@ int main()
     if (listener >= 0)
         close(listener);
     ps5_webui_stop();
+    /* ShadowMountPlus refuses to uninstall while a game runs, and RetroArch is one */
+    if (closed)
+        ps5_webui_finish_forwarders([](const char *line) { say("%s", line); });
     say("stopped");
     return 0;
 }

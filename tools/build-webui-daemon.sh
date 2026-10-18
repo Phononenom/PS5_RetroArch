@@ -55,7 +55,8 @@ with os.fdopen(fd, 'w') as file:
 print('ScreenScraper developer account: ' + ('none (excluded)' if exclude == '1' else 'built in (scrambled)' if 'DEV 1' in text else 'none (.env has none)'), file=sys.stderr)
 PY_DEV
 objects=()
-for source in daemon/webui_daemon src/webui_ps5 src/webui_transfer src/webui_update src/scraper src/scraper_http; do
+for source in daemon/webui_daemon src/webui_ps5 src/webui_transfer src/webui_update src/scraper src/scraper_http \
+    src/ps5_forwarders; do
     "$sdk/bin/prospero-clang++" -std=c++17 -O2 -Wall -Werror -DPS5_SCRAPER_CURL "${includes[@]}" \
         -c "$root/$source.cpp" -o "$build/${source##*/}.o"
     objects+=("$build/${source##*/}.o")

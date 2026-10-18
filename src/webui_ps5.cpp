@@ -6,6 +6,7 @@
 #include "webui_update.h"
 #include "webui_transfer.h"
 #include "scraper.h"
+#include "ps5_forwarders.h"
 #include "ps5_frontend_choice.h"
 #include "../vendor/retroarch/libretro-common/include/libretro.h"
 #include <microhttpd.h>
@@ -2109,8 +2110,58 @@ std::string webui_language()
     const auto found = values.find("webui_language");
     return found != values.end() && webui_language_known(found->second) ? found->second : "";
 }
+// The Game Forwarder page's tiles (src/ps5_forwarders.h), made beside the title's folder.
+ps5_forwarders::Paths forwarder_paths()
+{
+    ps5_forwarders::Paths paths;
+    paths.title = root_path;
+    if (root_path != "/app0")
+        paths.homebrew = root_path.substr(0, root_path.rfind('/'));
+    if (const char *port = std::getenv("PS5_FORWARDERS_SHADOWMOUNT_PORT")) // the tests' stand-in
+        paths.shadowmount_port = static_cast<unsigned short>(std::atoi(port));
+    return paths;
+}
+MHD_Result forwarders_route(MHD_Connection *c, const std::string &url, const std::string &method,
+                            Request &r)
+{
+    const auto paths = forwarder_paths();
+    const std::string id = arg(c, "id");
+    std::string why, made;
+    ps5_forwarders::Tile tile;
+    if (method == "GET" && url == "/api/forwarders")
+        return respond(c, 200, ps5_forwarders::list_json(paths));
+    if (method == "GET" && url == "/api/forwarders/icon")
+    {
+        const std::string file = ps5_forwarders::icon_file(paths, id);
+        return file.empty() ? error(c, 404, "There is no such tile.")
+                            : serve_file(c, file, "image/png", false);
+    }
+    if (method == "POST" && url == "/api/forwarders")
+        return ps5_forwarders::parse_tile(r.body, tile, why) &&
+                       ps5_forwarders::create(paths, tile, made, why)
+                   ? respond(c, 201, "{\"id\":" + quote(made) + '}')
+                   : error(c, 400, why.c_str());
+    if (method == "POST" && url == "/api/forwarders/edit")
+        return ps5_forwarders::parse_tile(r.body, tile, why) &&
+                       ps5_forwarders::update(paths, id, tile, why)
+                   ? respond(c, 200, "{\"saved\":true}")
+                   : error(c, 400, why.c_str());
+    if (method == "PUT" && url == "/api/forwarders/icon")
+        return ps5_forwarders::set_icon(paths, id, r.body, why)
+                   ? respond(c, 200, "{\"saved\":true}")
+                   : error(c, 400, why.c_str());
+    if (method == "POST" && url == "/api/forwarders/delete")
+    {
+        const std::string state = ps5_forwarders::remove(paths, id, why);
+        return state.empty() ? error(c, 400, why.c_str())
+                             : respond(c, 200, "{\"state\":" + quote(state) + '}');
+    }
+    return error(c, 404, "This page was not found.");
+}
 MHD_Result route(MHD_Connection *c, const std::string &url, const std::string &method, Request &r)
 {
+    if (url.rfind("/api/forwarders", 0) == 0)
+        return forwarders_route(c, url, method, r);
     if (method == "GET" && url == "/api/status")
     {
         struct statvfs fs{};
@@ -2372,6 +2423,8 @@ MHD_Result handle(void *, MHD_Connection *c, const char *url, const char *method
             prepare_game_file(c, *r);
         if (std::strcmp(url, "/api/scraper/start") == 0)
             r->body_limit = 4 << 20; // one line a game chosen
+        else if (std::strcmp(url, "/api/forwarders/icon") == 0)
+            r->body_limit = 2 << 20; // a tile's 512x512 PNG
         if (r->error)
             return error(c, r->error, r->message);
         if (r->transfer != Transfer::none)
@@ -2648,4 +2701,9 @@ void ps5_webui_stop()
     sessions.clear();
     ps5_scraper::shutdown();
     ps5_update::stop();
+}
+void ps5_webui_finish_forwarders(void (*say)(const char *line))
+{
+    if (!root_path.empty())
+        ps5_forwarders::finish_pending(forwarder_paths(), say);
 }

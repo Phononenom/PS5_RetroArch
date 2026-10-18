@@ -3087,6 +3087,7 @@ std::string library_json()
                 media += (media.empty() ? "" : ",") + quote(kind.first);
         out += std::string(first_game ? "" : ",") + "{\"path\":" + quote(game.path) +
                ",\"label\":" + quote(game.label) + ",\"key\":" + quote(game.key) +
+               ",\"core\":" + quote(game.core) +
                ",\"name\":" + quote(meta.count("name") ? meta.at("name") : "") +
                ",\"scraped\":" + quote(meta.count("scraped") ? meta.at("scraped") : "") +
                ",\"media\":[" + media + "]";
