@@ -68,7 +68,7 @@ index 1a3093cc4d..22a59f7a47 100644
  };
  
 diff --git a/Source/Core/Common/MemArenaUnix.cpp b/Source/Core/Common/MemArenaUnix.cpp
-index 26a123c081..b8c89961af 100644
+index 26a123c081..ad4a7a3f8d 100644
 --- a/Source/Core/Common/MemArenaUnix.cpp
 +++ b/Source/Core/Common/MemArenaUnix.cpp
 @@ -21,6 +21,24 @@
@@ -566,7 +566,7 @@ index c53281053f..885cdfac84 100644
      return true; // Always "continue"
    });
 diff --git a/Source/Core/DolphinLibretro/Common/Options.cpp b/Source/Core/DolphinLibretro/Common/Options.cpp
-index 7d27a1ea3c..0d882dcb74 100644
+index 7d27a1ea3c..9a9f29c84a 100644
 --- a/Source/Core/DolphinLibretro/Common/Options.cpp
 +++ b/Source/Core/DolphinLibretro/Common/Options.cpp
 @@ -1,6 +1,13 @@
@@ -781,7 +781,7 @@ index cd8753b666..85271453ba 100644
    RETRO_PERFORMANCE_STOP(dolphin_main_func);
  
 diff --git a/Source/Core/DolphinLibretro/Video.cpp b/Source/Core/DolphinLibretro/Video.cpp
-index b4003b25b1..0275157ec2 100644
+index b4003b25b1..0a1bc9fa23 100644
 --- a/Source/Core/DolphinLibretro/Video.cpp
 +++ b/Source/Core/DolphinLibretro/Video.cpp
 @@ -71,6 +71,52 @@ static Common::DynamicLibrary d3d11_library;
@@ -889,6 +889,22 @@ index 6338e52e3d..10539c661e 100644
    }
  }
  
+diff --git a/Source/Core/VideoCommon/Assets/CustomAssetCache.cpp b/Source/Core/VideoCommon/Assets/CustomAssetCache.cpp
+index 3b15d5733e..e5cf6f70d2 100644
+--- a/Source/Core/VideoCommon/Assets/CustomAssetCache.cpp
++++ b/Source/Core/VideoCommon/Assets/CustomAssetCache.cpp
+@@ -21,6 +21,11 @@ void CustomAssetCache::Initialize()
+   const size_t keep_unused_mem = std::max(sys_mem / 2, std::min(sys_mem, must_keep_unused));
+ 
+   m_max_ram_available = sys_mem - keep_unused_mem;
++#ifdef __PROSPERO__
++  // The PS5's sysctl answers no usable physical size, which left texture packs no memory
++  // at all (issue 5); the title's own budget is what counts: a fixed share of it.
++  m_max_ram_available = 512 * size_t(1024 * 1024);
++#endif
+ 
+   if (m_max_ram_available == 0)
+     ERROR_LOG_FMT(VIDEO, "Not enough system memory for custom resources.");
 diff --git a/Source/Core/VideoCommon/CommandProcessor.cpp b/Source/Core/VideoCommon/CommandProcessor.cpp
 index 1dbf466f1c..bae595786b 100644
 --- a/Source/Core/VideoCommon/CommandProcessor.cpp
