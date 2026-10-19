@@ -5338,7 +5338,7 @@ EDITS += [
      '                           extern double ps5_fg_last_core_run_ms;\n'
      '                           if (fg_by_time > fg_gap && ps5_fg_last_core_run_ms * ps5_fg_core_fps < 1000.0)\n'
      '                              fg_gap = fg_by_time;\n',
-     'patches/series, 0137: a slow core is not a skipped call'),
+     'patches/series, 0137: the clock counts skipped calls only when the core'),
 ]
 
 

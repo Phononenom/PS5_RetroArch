@@ -869,6 +869,47 @@ index 8df1a7e320..2892601cf7 100644
  
  class SWGfx : public SW::SWGfx
  {
+diff --git a/Source/Core/DolphinLibretro/Vulkan.cpp b/Source/Core/DolphinLibretro/Vulkan.cpp
+index bc463c7ceb..3206d041e1 100644
+--- a/Source/Core/DolphinLibretro/Vulkan.cpp
++++ b/Source/Core/DolphinLibretro/Vulkan.cpp
+@@ -91,6 +91,9 @@ struct VkSwapchainKHR_T
+   std::mutex mutex;
+   std::condition_variable condVar;
+   int current_index;
++#ifdef __PROSPERO__
++  uint32_t width, height; /* the images' own size, which the frontend draws whole */
++#endif
+ };
+ static VkSwapchainKHR_T chain;
+ 
+@@ -272,6 +275,10 @@ vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInf
+     swapchain_mask >>= 1;
+   }
+   chain.images.resize(chain.count);
++#ifdef __PROSPERO__
++  chain.width = pCreateInfo->imageExtent.width;
++  chain.height = pCreateInfo->imageExtent.height;
++#endif
+ 
+   for (uint32_t i = 0; i < chain.count; i++)
+   {
+@@ -402,6 +409,15 @@ static VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue,
+     }
+   }
+ 
++#ifdef __PROSPERO__
++  // The image handed over is the swapchain's, drawn whole: its size, not the EFB's, which can
++  // differ and made frame generation read a part of the image (patches/series, 0138).
++  if (chain.width && chain.height)
++  {
++    out_w = chain.width;
++    out_h = chain.height;
++  }
++#endif
+   // Fallback: negotiated init dimensions (or a sane default).
+   if (out_w == 0 || out_h == 0)
+   {
 diff --git a/Source/Core/VideoBackends/Vulkan/VKMain.cpp b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 index 6338e52e3d..10539c661e 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKMain.cpp
