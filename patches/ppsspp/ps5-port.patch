@@ -942,7 +942,7 @@ index d222cd03c..0ad209614 100644
  }
  
 diff --git a/libretro/libretro.cpp b/libretro/libretro.cpp
-index 3b2f10317..2e76917bb 100644
+index 3b2f10317..6b9ab8d44 100644
 --- a/libretro/libretro.cpp
 +++ b/libretro/libretro.cpp
 @@ -48,6 +48,8 @@
@@ -1123,7 +1123,21 @@ index 3b2f10317..2e76917bb 100644
  static void check_dynamic_variables(CoreParameter &coreParam) {
     if (g_Config.bForceLagSync)
     {
-@@ -1702,8 +1857,21 @@ static void retro_input(void)
+@@ -1338,8 +1493,11 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
+ 
+    info->geometry.base_width   = g_Config.iInternalResolution * NATIVEWIDTH;
+    info->geometry.base_height  = g_Config.iInternalResolution * NATIVEHEIGHT;
+-   info->geometry.max_width    = g_Config.iInternalResolution * NATIVEWIDTH;
+-   info->geometry.max_height   = g_Config.iInternalResolution * NATIVEHEIGHT;
++   // The largest internal resolution (10x, 4800x2720, the PS5 default) is always the
++   // maximum: a change from the Quick Menu then never restarts RetroArch's video driver,
++   // whose cached Vulkan context the core's render thread kept using (issue 63).
++   info->geometry.max_width    = 10 * NATIVEWIDTH;
++   info->geometry.max_height   = 10 * NATIVEHEIGHT;
+ 
+    if (g_Config.bDisplayCropTo16x9)
+       info->geometry.base_height -= g_Config.iInternalResolution * 2;
+@@ -1702,8 +1860,21 @@ static void retro_input(void)
     __CtrlSetAnalogXY(CTRL_STICK_RIGHT, x_right, y_right);
  }
  
@@ -1145,7 +1159,7 @@ index 3b2f10317..2e76917bb 100644
     if (g_pendingBoot) {
        BootState state = PSP_InitUpdate(&g_bootErrorString);
        switch (state) {
-@@ -1755,6 +1923,7 @@ void retro_run(void)
+@@ -1755,6 +1926,7 @@ void retro_run(void)
        check_variables(PSP_CoreParameter());
     else
        check_dynamic_variables(PSP_CoreParameter());
@@ -1153,7 +1167,7 @@ index 3b2f10317..2e76917bb 100644
  
     retro_input();
  
-@@ -1780,6 +1949,7 @@ void retro_run(void)
+@@ -1780,6 +1952,7 @@ void retro_run(void)
     else
        EmuFrame();
  
