@@ -200,8 +200,8 @@ fi
 # path as the title sees it (/app0/content/...). With --retroarch-frames it quits
 # after that many frames and pictures the last one, collected as klog/game-<stamp>.png.
 if [[ -n $game ]]; then
-    [[ $game =~ ^[a-z0-9_]+:/.+ ]] ||
-        { echo "--game takes CORE:PATH, PATH as the title sees it (/app0/...)" >&2; exit 2; }
+    [[ $game =~ ^[a-z0-9_]+:(/.+)?$ ]] ||
+        { echo "--game takes CORE:PATH, PATH as the title sees it (/app0/...), or CORE: for a core without content" >&2; exit 2; }
 fi
 
 # The pad script (src/input_ps5.cpp): presses and actions timed from RetroArch's
@@ -382,9 +382,9 @@ with connect(**dt.load_settings()) as ftp:
     lines = []
     if sys.argv[17]:
         core, path = sys.argv[17].split(":", 1)
-        lines += ["-L", f"/app0/cores/{core}_libretro.so", path]
+        lines += ["-L", f"/app0/cores/{core}_libretro.so"] + ([path] if path else [])  # CORE: starts a core without content
         remove_if_present(ftp, f"/data/homebrew/{sys.argv[1]}/game-shot.png")
-        print(f"    RetroArch starts {core} with {path}")
+        print(f"    RetroArch starts {core} with {path or 'no content'}")
     # --menu-capture: the whole frame at that frame count, menu included (patch 0031's
     # read-back), written to /app0/shot.ppm and collected after the run.
     if int(sys.argv[18]):
