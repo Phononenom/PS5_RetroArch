@@ -2915,6 +2915,41 @@ bool edit_game(const std::string &system, const std::string &key, const std::str
     return false;
 }
 
+bool forget_game(const std::string &system, const std::string &key, const std::string &path,
+                 std::string &why)
+{
+    if (!safe_part(system) || !safe_part(key))
+    {
+        why = "Choose a game in the library.";
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(metadata_lock);
+    const std::string file = path.substr(0, path.find('#'));
+    bool shared_name = false;
+    for (const auto &game : load_games())
+        if (game.path != path)
+        {
+            if (game.path.substr(0, game.path.find('#')) == file)
+            {
+                why = "This archive holds other games too, so it was not deleted.";
+                return false;
+            }
+            shared_name = shared_name || (game.system == system && game.key == key);
+        }
+    if (!edit_playlist_entries(path, [](Json &) { return false; }))
+    {
+        why = "A playlist could not be updated. Check console storage; nothing was deleted.";
+        return false;
+    }
+    if (shared_name)
+        return true; // the other copy keeps the shared details and media
+    for (const auto &kind : kind_catalog)
+        for (const char *ext : {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm", ".pdf"})
+            unlink((library_root() + '/' + system + '/' + kind.folder + '/' + key + ext).c_str());
+    unlink(meta_path(system, key).c_str());
+    return true;
+}
+
 bool upload_target(const std::string &system, const std::string &key, const std::string &kind,
                    const std::string &type, std::string &temporary, std::string &destination,
                    std::string &why)

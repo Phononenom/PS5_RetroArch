@@ -91,6 +91,11 @@ bool game_identity(const std::string &system, const std::string &game, const std
                    std::string &core);
 bool edit_game(const std::string &system, const std::string &game, const std::string &body,
                std::string &why);
+/* A game file the WebUI is deleting (issue 57): its entries leave every playlist, and its
+ * details and media go too unless another file of the same name (an ISO beside a CHD)
+ * still uses them. The caller deletes the file itself afterwards. */
+bool forget_game(const std::string &system, const std::string &game, const std::string &path,
+                 std::string &why);
 /* A media file the user uploads for a game: where to write it (a hidden file beside its
  * final name); false with why for a type the frontends cannot show. Once committed,
  * uploaded() makes it the kind's only file and marks it the user's: no scrape replaces it. */

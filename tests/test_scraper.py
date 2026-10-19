@@ -544,6 +544,64 @@ class Scraper(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/library/game?' + query, json.dumps(metadata).encode())[0], 400)
         self.assertEqual(rom.read_bytes(), b'replacement')
 
+    def test_delete_game(self):
+        """Issue 57: a game deleted from Games takes its file, the tracks its disc file
+        names and its playlist entries; details and media go only with the last copy of
+        that name; an archive holding other games, or a name outside its folder, stays."""
+        (self.root / 'info/snes9x_libretro.info').write_text(
+            'display_name = "Snes9x"\ncorename = "Snes9x"\ndatabase = "' + DB + '"\nsupported_extensions = "sfc|smc|zip|cue|iso|chd"\n')
+        folder = self.root / 'content/SNES'
+        folder.mkdir(parents=True, exist_ok=True)
+        games = dict(self.games, **{'Disc Game': '/app0/content/SNES/Disc Game.cue', 'Twin CHD': '/app0/content/SNES/Twin.chd',
+                                    'Twin ISO': '/app0/content/SNES/Twin.iso', 'Pack A': '/app0/content/SNES/Pack.zip#a.sfc',
+                                    'Pack B': '/app0/content/SNES/Pack.zip#b.sfc'})
+        self.write_playlist(games)
+        for path in games.values():
+            (self.root / path.removeprefix('/app0/').split('#')[0]).write_bytes(b'backup')
+        (folder / 'Disc Game.cue').write_text('FILE "Disc Game (Track 1).bin" BINARY\n  TRACK 01 MODE2/2352\n'
+                                              'FILE "Disc Game (Track 2).bin" BINARY\n  TRACK 02 AUDIO\n'
+                                              'FILE "../../config/keep.cfg" BINARY\n')
+        tracks = [folder / 'Disc Game (Track 1).bin', folder / 'Disc Game (Track 2).bin']
+        for track in tracks:
+            track.write_bytes(b'track')
+        keep = self.root / 'config/keep.cfg'
+        keep.write_text('outside the content folder')
+        meta = self.root / 'library/snes/metadata/Twin.meta'
+        cover = self.root / 'library/snes/covers/Twin.png'
+        for path in (meta, cover):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'shared')
+
+        def delete(path):
+            library = json.loads(self.request('GET', '/api/library')[1])
+            system, game = next((s['id'], g) for s in library['systems'] for g in s['games'] if g['path'] == path)
+            return self.request('POST', '/api/library/delete?' + urllib.parse.urlencode({'system': system, 'game': game['key'], 'path': path}))
+
+        def listed():
+            return {item['path'] for item in json.loads((self.root / f'playlists/{DB}.lpl').read_text())['items']}
+
+        status, body = delete(games['Twin ISO'])
+        self.assertEqual(status, 200, body)
+        self.assertFalse((folder / 'Twin.iso').exists())
+        self.assertTrue((folder / 'Twin.chd').exists() and meta.exists() and cover.exists())
+        self.assertNotIn(games['Twin ISO'], listed())
+        self.assertIn(games['Twin CHD'], listed())
+        self.assertEqual(delete(games['Twin CHD'])[0], 200)
+        self.assertFalse(meta.exists() or cover.exists())
+
+        self.assertEqual(delete(games['Disc Game'])[0], 200)
+        self.assertFalse((folder / 'Disc Game.cue').exists() or any(t.exists() for t in tracks))
+        self.assertTrue(keep.exists())
+
+        status, body = delete(games['Pack A'])
+        self.assertEqual(status, 409, body)
+        self.assertTrue((folder / 'Pack.zip').exists())
+        self.assertTrue({games['Pack A'], games['Pack B']} <= listed())
+        query = urllib.parse.urlencode({'system': 'snes', 'game': 'keep', 'path': '/app0/config/keep.cfg'})
+        self.assertEqual(self.request('POST', '/api/library/delete?' + query)[0], 404)
+        self.assertTrue(keep.exists())
+        self.assertEqual(listed(), set(games.values()) - {games['Twin ISO'], games['Twin CHD'], games['Disc Game']})
+
     def test_games_page_in_a_browser(self):
         playwright = next((str(p) for p in (Path.home() / '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright-core',
                                             Path('/usr/lib/chatgpt/resources/cua_node/lib/node_modules/playwright-core')) if p.exists()),

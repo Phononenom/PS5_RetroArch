@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <arpa/inet.h>
+#include <cctype>
 #include <cerrno>
 #include <climits>
 #include <cmath>
@@ -1439,6 +1440,72 @@ std::string game_files_json(const GameFiles &g)
            ",\"stateFolder\":" + quote(g.state_folder) + ",\"stem\":" + quote(g.stem) +
            ",\"core\":" + quote(g.core) + ",\"warning\":" + quote(g.why) + '}';
 }
+// The files a disc image names beside it: a .cue's or .gdi's tracks, an .m3u's discs and
+// their tracks, inside the image's own folder, so a deleted game leaves none behind.
+void disc_files(const std::string &image, std::vector<std::string> &out, int depth = 0)
+{
+    const auto dot = image.find_last_of('.');
+    std::string ext = dot == std::string::npos ? "" : image.substr(dot + 1);
+    for (auto &ch : ext)
+        ch = char(std::tolower((unsigned char)ch));
+    if (depth > 2 || (ext != "cue" && ext != "gdi" && ext != "m3u"))
+        return;
+    const std::string folder = image.substr(0, image.find_last_of('/'));
+    const std::string text = read_file(image, 1 << 20);
+    size_t start = 0;
+    for (int line_number = 0; start < text.size(); ++line_number)
+    {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string line = text.substr(start, end - start);
+        start = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+            line.pop_back();
+        line.erase(0, line.find_first_not_of(" \t"));
+        std::string name;
+        if (ext == "m3u")
+            name = line.empty() || line[0] == '#' ? "" : line;
+        else
+        {
+            // .cue: FILE "track.bin" BINARY; .gdi: <n> <lba> <type> <size> <file> <offset>
+            // after a first line holding the track count.
+            size_t at = 0;
+            if (ext == "cue")
+            {
+                if (line.compare(0, 5, "FILE ") != 0)
+                    continue;
+                at = 5;
+            }
+            else
+            {
+                if (line_number == 0)
+                    continue;
+                for (int field = 0; field < 4 && at != std::string::npos; ++field)
+                    at = line.find_first_not_of(" \t", line.find_first_of(" \t", at));
+                if (at == std::string::npos)
+                    continue;
+            }
+            if (at < line.size() && line[at] == '"')
+            {
+                const size_t close = line.find('"', at + 1);
+                if (close != std::string::npos)
+                    name = line.substr(at + 1, close - at - 1);
+            }
+            else if (at < line.size())
+                name = line.substr(at, line.find_first_of(" \t", at) - at);
+        }
+        if (name.empty() || name[0] == '/' || name.find("..") != std::string::npos)
+            continue;
+        const std::string path = folder + '/' + name;
+        struct stat st{};
+        if (std::find(out.begin(), out.end(), path) != out.end() || !game_safe_path(path) ||
+            stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+        out.push_back(path);
+        disc_files(path, out, depth + 1);
+    }
+}
 bool game_file_target(MHD_Connection *c, const GameFiles &g, bool writing, std::string &target)
 {
     const std::string kind = arg(c, "kind"), selected = arg(c, "file");
@@ -1807,6 +1874,30 @@ MHD_Result scraper_route(MHD_Connection *c, const std::string &url, const std::s
             unlink((target + ".png").c_str());
         r.temporary.clear();
         return respond(c, 201, "{\"stored\":true}");
+    }
+    // A game deleted from Games (issue 57): its file (an archive, or a disc image with the
+    // tracks and discs it names), its playlist entries, and the details and media no
+    // other copy uses. Only inside the content folder or a USB or extended drive.
+    if (method == "POST" && url == "/api/library/delete")
+    {
+        GameFiles game;
+        if (!game_files(c, game))
+            return error(c, 404, game.why.c_str());
+        const std::string path = arg(c, "path");
+        std::vector<std::string> files{game.rom};
+        if (path.find('#') == std::string::npos)
+            disc_files(game.rom, files);
+        if (!ps5_scraper::forget_game(arg(c, "system"), arg(c, "game"), path, why))
+            return error(c, 409, why.c_str());
+        unsigned left = 0;
+        for (const auto &file : files)
+            if (unlink(file.c_str()) != 0 && errno != ENOENT)
+                ++left;
+        if (left)
+            return error(c, 500,
+                         "The game left the library, but some of its files could not be deleted. "
+                         "Check console storage.");
+        return respond(c, 200, "{\"deleted\":" + std::to_string(files.size()) + "}");
     }
     if (method == "POST" && url == "/api/library/game")
         return ps5_scraper::edit_game(arg(c, "system"), arg(c, "game"), r.body, why)

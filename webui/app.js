@@ -1122,6 +1122,22 @@ async function loadSheetFiles() {
       });
       actions.append(upload, download, input); group.append(select, destination, preview, slotLabel, actions, status); box.append(group);
     }
+    // Deleting a game (issue 57): the backup and the tracks its disc file names, and its
+    // place in RetroArch and EmulationStation; saves and savestates stay.
+    const removal = element('section', undefined, 'sheet-file-group'), removeActions = element('div', undefined, 'sheet-actions');
+    const remove = element('button', 'Delete game…', 'secondary'), removeStatus = element('p', '', 'sheet-status');
+    remove.type = 'button'; removeStatus.setAttribute('role', 'status'); removeActions.append(remove);
+    removal.append(element('h4', 'Delete game'), element('p', 'Deletes this backup from your PS5, with its disc’s track files, and removes it from RetroArch and EmulationStation. Saves and savestates are kept. Close the game on the console first.', 'muted sheet-hint'), removeActions, removeStatus);
+    remove.addEventListener('click', async () => {
+      if (sheetBusy || !confirm(i18n.t(`Delete ${data.rom.name} from your PS5?`) + '\n\n' + i18n.t('This cannot be undone. Export the backup first if you need a copy.'))) return;
+      sheetBusy = true; remove.disabled = true;
+      try {
+        await api(`/api/library/delete?${sheetQuery(context)}`, { method: 'POST' });
+        sheetBusy = false; $('#game-sheet').close(); announce(`${gameName(context.game)} deleted.`); await loadGames();
+      } catch (error) { removeStatus.textContent = error.message; removeStatus.classList.add('inline-error'); }
+      finally { sheetBusy = false; remove.disabled = false; }
+    });
+    box.append(removal);
     box.append(element('p', 'File transfers preserve bytes; they do not convert save formats. Cores with private save directories and multi-file disc sets may need the Content browser or FTP.', 'muted sheet-hint'));
   } catch (error) { if (sheetGame === context) box.replaceChildren(element('p', error.message, 'inline-error')); }
 }
