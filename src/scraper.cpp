@@ -2905,8 +2905,7 @@ bool edit_game(const std::string &system, const std::string &key, const std::str
             edit_playlist_entries(game.path,
                                   [&](Json &entry)
                                   {
-                                      entry.fields["label"] =
-                                          Json{Json::string, false, 0, meta["name"]};
+                                      entry.fields["label"] = Json::of(meta["name"]);
                                       return true;
                                   });
         return true;

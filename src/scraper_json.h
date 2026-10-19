@@ -51,6 +51,13 @@ struct Json
 
     /* The value as JSON text, for files the WebUI edits (RetroArch's playlists): fields
      * come out in name order, which RetroArch's reader does not mind. */
+    static Json of(const std::string &value)
+    {
+        Json out;
+        out.kind = string;
+        out.text = value;
+        return out;
+    }
     std::string dump() const
     {
         switch (kind)
@@ -86,8 +93,8 @@ struct Json
         {
             std::string out = "{";
             for (const auto &field : fields)
-                out += (out.size() > 1 ? "," : "") + Json{string, false, 0, field.first}.dump() +
-                       ':' + field.second.dump();
+                out += (out.size() > 1 ? "," : "") + of(field.first).dump() + ':' +
+                       field.second.dump();
             return out + '}';
         }
         default:
