@@ -61,3 +61,4 @@ config.h
 tools/build-rpcs3.sh
 tools/build-llvm.sh
 tooling/rpcs3/
+handoff/
