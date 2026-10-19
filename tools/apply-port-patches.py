@@ -5326,6 +5326,21 @@ EDITS += [
      SMB + ' (content)'),
 ]
 
+# A core slower than real time (patches/series, 0137): its frames are far apart on the clock,
+# but each call hands one over, so the clock's gap (0121) planned groups of calls that never
+# came; only their first pictures (t 0.25, 0.5) showed, never the real frame: a doubled image.
+EDITS += [
+    ('gfx/drivers/vulkan.c',
+     '                           if (fg_by_time > fg_gap)\n'
+     '                              fg_gap = fg_by_time;\n',
+     '                           /* patches/series, 0137: the clock counts skipped calls only when the core\n'
+     '                            * itself runs faster than real time; a slow core hands over a frame each call */\n'
+     '                           extern double ps5_fg_last_core_run_ms;\n'
+     '                           if (fg_by_time > fg_gap && ps5_fg_last_core_run_ms * ps5_fg_core_fps < 1000.0)\n'
+     '                              fg_gap = fg_by_time;\n',
+     'patches/series, 0137: a slow core is not a skipped call'),
+]
+
 
 def main() -> int:
     if len(sys.argv) != 2:

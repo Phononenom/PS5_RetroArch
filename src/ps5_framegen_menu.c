@@ -222,8 +222,10 @@ uint64_t ps5_fg_core_run_begin_ns;
 /* The runloop calls this with the time of each call of the core (patches/series, 0122) */
 static double run_sum_ms, run_max_ms;
 static unsigned run_calls, run_long;
+double ps5_fg_last_core_run_ms; /* the last call's, for the driver's gap (patches/series, 0137) */
 void ps5_fg_note_core_run(double ms)
 {
+    ps5_fg_last_core_run_ms = ms;
     run_sum_ms += ms;
     if (ms > run_max_ms)
         run_max_ms = ms;
