@@ -7,8 +7,9 @@
 # those in /app0. The core renders through the frontend's Vulkan device and runs
 # the x86-64 JIT (Jit64) with fastmem.
 #
-# The port is one patch, patches/dolphin/ps5-port.patch, applied to the pinned
-# tree. DOLPHIN_DEV=1 builds the tree as it stands instead (no reset, no patch),
+# The port is patches/dolphin/ps5-port.patch, applied to the pinned tree, then
+# patches/dolphin/gba-tcp-link.patch (GBA (TCP) as a controller-port device type;
+# DOLPHIN_NO_GBA_TCP=1 leaves it out, which builds the port patch alone). DOLPHIN_DEV=1 builds the tree as it stands instead (no reset, no patch),
 # which is how the port is edited: change .deps/dolphin-src, build with
 # DOLPHIN_DEV=1, then write the patch back with
 # `git -C .deps/dolphin-src diff > patches/dolphin/ps5-port.patch`.
@@ -24,8 +25,11 @@ source "$root/tools/core-stamp.sh"
 # so it withdraws the stamp: the next ordinary build rebuilds from the pinned
 # revision and the committed patch rather than keeping that output
 # (2026-09-25: an instrumented Dolphin survived a gate build this way).
-[[ -z ${DOLPHIN_DEV:-} ]] || rm -f -- "$core_stamp_dir/dolphin"
-[[ -n ${DOLPHIN_DEV:-} ]] || core_stamp_skip dolphin \
+# DOLPHIN_NO_GBA_TCP is a variant the stamp's inputs do not describe, so it is
+# treated the same way.
+nonstandard=${DOLPHIN_DEV:-}${DOLPHIN_NO_GBA_TCP:-}
+[[ -z $nonstandard ]] || rm -f -- "$core_stamp_dir/dolphin"
+[[ -n $nonstandard ]] || core_stamp_skip dolphin \
     "$root/build/cores/stage/cores/dolphin_libretro.so" \
     "$root/build/cores/stage/info/dolphin_libretro.info" \
     "$root/build/cores/stage/system/dolphin-emu/Sys" \
@@ -68,6 +72,8 @@ else
     git -C "$source_dir" clean -qfdx
     git -C "$source_dir" submodule update --init --recursive --quiet --jobs 8
     git -C "$source_dir" apply --whitespace=nowarn "$root/patches/dolphin/ps5-port.patch"
+    [[ -n ${DOLPHIN_NO_GBA_TCP:-} ]] ||
+        git -C "$source_dir" apply --whitespace=nowarn "$root/patches/dolphin/gba-tcp-link.patch"
 fi
 got=$(git -C "$source_dir" rev-parse HEAD)
 [[ $got == "$revision" ]] || { echo "error: the tree is at $got, wanted $revision" >&2; exit 2; }
@@ -124,10 +130,12 @@ printf '==> [dolphin] staged Sys: %s files, %s bytes\n' \
     "$(find "$root/build/cores/stage/system/dolphin-emu/Sys" -type f | wc -l)" \
     "$(du -sb "$root/build/cores/stage/system/dolphin-emu/Sys" | cut -f1)"
 
-python3 - "$build" "$source_dir" "$revision" "$info_revision" "$info_sha" "$source_date_epoch" <<'PY'
+python3 - "$build" "$source_dir" "$revision" "$info_revision" "$info_sha" "$source_date_epoch" \
+    "${DOLPHIN_NO_GBA_TCP:-}" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
 build, source = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 revision, info_revision, info_sha, epoch = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+no_gba_tcp = bool(sys.argv[7])
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 report = json.loads((build / 'abi.json').read_text())
@@ -140,8 +148,9 @@ report.update(source_revision=revision, source_date_epoch=int(epoch),
 report['port_inputs_sha256'] = {name: sha(pathlib.Path(name)) for name in
     ['tools/build-dolphin.sh', 'tooling/dolphin/ps5-toolchain.cmake',
      'tooling/dolphin/ps5-libc-shims.cpp', 'tooling/native/core_cxx_runtime.cpp',
-     'tooling/native/ps5-core.ld', 'patches/dolphin/ps5-port.patch']}
+     'tooling/native/ps5-core.ld', 'patches/dolphin/ps5-port.patch']
+    + ([] if no_gba_tcp else ['patches/dolphin/gba-tcp-link.patch'])}
 (build / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
 PY
-[[ -n ${DOLPHIN_DEV:-} ]] || core_stamp_write
+[[ -n $nonstandard ]] || core_stamp_write
 printf '==> [dolphin] built and ABI-checked revision %s; console loading is a separate gate\n' "$revision"
