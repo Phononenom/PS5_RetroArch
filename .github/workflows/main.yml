@@ -3,10 +3,19 @@
 # .github/workflows/build-dolphin-core.yml in your fork of mihawk-99/PS5_RetroArch,
 # after committing patches/dolphin/gba-tcp-link.patch and the tools/build-dolphin.sh
 # change. Run it from the Actions tab (Run workflow).
+#
+# Clang 20 is required: only its PS5 driver links with -m elf_x86_64_fbsd and the
+# PS5 page-size flags; Clang 18 and 19 produce a core whose ELF OS/ABI byte is wrong,
+# which tools/check-core.py and the console's core loader both reject.
 name: Build Dolphin core
 
 on:
   workflow_dispatch:
+    inputs:
+      baseline:
+        description: 'Also build with ps5-port.patch alone (no GBA TCP patch)'
+        type: boolean
+        default: false
   push:
     paths:
       - 'patches/dolphin/**'
@@ -14,22 +23,18 @@ on:
       - 'tooling/dolphin/**'
       - '.github/workflows/build-dolphin-core.yml'
 
+env:
+  CLANG_VERSION: '20'
+
 jobs:
   dolphin:
     name: dolphin_libretro (${{ matrix.variant }})
-    # Pinned: tooling/prospero-clang18 wants Clang 18, which 24.04's `clang` is.
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # The port patch alone: proves the base build works before blaming the new patch.
-          - variant: baseline
-            no_gba_tcp: '1'
-          # ps5-port.patch + gba-tcp-link.patch.
-          - variant: gba-tcp
-            no_gba_tcp: ''
+        include: ${{ fromJSON(inputs.baseline && '[{"variant":"gba-tcp","no_gba_tcp":""},{"variant":"baseline","no_gba_tcp":"1"}]' || '[{"variant":"gba-tcp","no_gba_tcp":""}]') }}
     steps:
       - name: Free disk space
         run: |
@@ -56,21 +61,31 @@ jobs:
           ref: ${{ steps.sdk.outputs.rev }}
           path: PS5_PayloadSDK
 
-      - name: Install build tools
+      - name: Install build tools and Clang ${{ env.CLANG_VERSION }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang clang-18 lld-18 llvm-18 cmake ninja-build make pkg-config \
-            wget curl unzip ccache python3 git
-          clang --version | head -1
-          test -x /usr/bin/clang
+            wget curl unzip make cmake ninja-build pkg-config ccache python3 git \
+            lsb-release software-properties-common gnupg ca-certificates
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$CLANG_VERSION"
+          sudo apt-get install -y "lld-$CLANG_VERSION" "llvm-$CLANG_VERSION"
+          # build-dolphin.sh uses /usr/bin/clang, and tools/check-core.py calls an
+          # unversioned llvm-objdump.
+          sudo update-alternatives --install /usr/bin/clang clang \
+            "/usr/bin/clang-$CLANG_VERSION" 100
+          sudo update-alternatives --set clang "/usr/bin/clang-$CLANG_VERSION"
+          sudo ln -sf "/usr/lib/llvm-$CLANG_VERSION/bin/llvm-objdump" /usr/local/bin/llvm-objdump
+          /usr/bin/clang --version | head -1
+          llvm-objdump --version | head -2
 
-      - name: ccache
-        uses: actions/cache@v4
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-dolphin-${{ matrix.variant }}-${{ github.sha }}
-          restore-keys: ccache-dolphin-${{ matrix.variant }}-
+          key: ccache-dolphin-${{ matrix.variant }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
+          restore-keys: ccache-dolphin-${{ matrix.variant }}-clang${{ env.CLANG_VERSION }}-
 
       - name: Bootstrap the PS5 SDK
         working-directory: PS5_RetroArch
@@ -87,6 +102,14 @@ jobs:
           JOBS: 4
         run: bash tools/build-dolphin.sh
 
+      # Saved even when the build fails, so a retry does not recompile Dolphin from zero.
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-dolphin-${{ matrix.variant }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
+
       - name: Collect output
         working-directory: PS5_RetroArch
         run: |
@@ -95,6 +118,7 @@ jobs:
           cp build/cores/stage/info/dolphin_libretro.info out/
           cp build/cores/dolphin/abi.json build/cores/dolphin/build.json out/
           (cd out && sha256sum dolphin_libretro.so > dolphin_libretro.so.sha256)
+          head -c 8 out/dolphin_libretro.so | xxd
           ls -l out
 
       - uses: actions/upload-artifact@v4
