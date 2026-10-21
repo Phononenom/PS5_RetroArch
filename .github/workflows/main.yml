@@ -1,0 +1,104 @@
+# Builds only the Dolphin libretro core for the PS5 title: no Vulkan driver, no
+# frontend, none of the other 32 cores. Put this file at
+# .github/workflows/build-dolphin-core.yml in your fork of mihawk-99/PS5_RetroArch,
+# after committing patches/dolphin/gba-tcp-link.patch and the tools/build-dolphin.sh
+# change. Run it from the Actions tab (Run workflow).
+name: Build Dolphin core
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'patches/dolphin/**'
+      - 'tools/build-dolphin.sh'
+      - 'tooling/dolphin/**'
+      - '.github/workflows/build-dolphin-core.yml'
+
+jobs:
+  dolphin:
+    name: dolphin_libretro (${{ matrix.variant }})
+    # Pinned: tooling/prospero-clang18 wants Clang 18, which 24.04's `clang` is.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The port patch alone: proves the base build works before blaming the new patch.
+          - variant: baseline
+            no_gba_tcp: '1'
+          # ps5-port.patch + gba-tcp-link.patch.
+          - variant: gba-tcp
+            no_gba_tcp: ''
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
+      # Laid out as the README's sibling workspace: PS5_RetroArch next to PS5_PayloadSDK.
+      - uses: actions/checkout@v4
+        with:
+          path: PS5_RetroArch
+
+      - name: Read the pinned SDK revision
+        id: sdk
+        run: |
+          rev=$(sed -n 's/^sdk_revision=\([0-9a-f]\{40\}\).*/\1/p' \
+                  PS5_RetroArch/tools/setup-native-dependencies.sh)
+          [[ -n $rev ]] || { echo "no sdk_revision found" >&2; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      # ASSUMPTION: the README's "my payload SDK fork" is github.com/mihawk-99/PS5_PayloadSDK.
+      - uses: actions/checkout@v4
+        with:
+          repository: mihawk-99/PS5_PayloadSDK
+          ref: ${{ steps.sdk.outputs.rev }}
+          path: PS5_PayloadSDK
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang clang-18 lld-18 llvm-18 cmake ninja-build make pkg-config \
+            wget curl unzip ccache python3 git
+          clang --version | head -1
+          test -x /usr/bin/clang
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-dolphin-${{ matrix.variant }}-${{ github.sha }}
+          restore-keys: ccache-dolphin-${{ matrix.variant }}-
+
+      - name: Bootstrap the PS5 SDK
+        working-directory: PS5_RetroArch
+        env:
+          PS5_PAYLOAD_SDK_FORK: ${{ github.workspace }}/PS5_PayloadSDK
+        run: bash tools/setup-native-dependencies.sh
+
+      - name: Build the Dolphin core
+        working-directory: PS5_RetroArch
+        env:
+          PS5_PAYLOAD_SDK: ${{ github.workspace }}/PS5_RetroArch/.deps/native/ps5-payload-sdk
+          PS5_CLANG: /usr/bin/clang
+          DOLPHIN_NO_GBA_TCP: ${{ matrix.no_gba_tcp }}
+          JOBS: 4
+        run: bash tools/build-dolphin.sh
+
+      - name: Collect output
+        working-directory: PS5_RetroArch
+        run: |
+          mkdir -p out
+          cp build/cores/stage/cores/dolphin_libretro.so out/
+          cp build/cores/stage/info/dolphin_libretro.info out/
+          cp build/cores/dolphin/abi.json build/cores/dolphin/build.json out/
+          (cd out && sha256sum dolphin_libretro.so > dolphin_libretro.so.sha256)
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dolphin_libretro-${{ matrix.variant }}
+          path: PS5_RetroArch/out/
+          if-no-files-found: error
