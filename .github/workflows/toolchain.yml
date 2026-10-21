@@ -1,0 +1,90 @@
+# Quick toolchain probe (a few minutes, no Dolphin). Put at
+# .github/workflows/diagnose-toolchain.yml and run it from the Actions tab.
+# It compiles and links one tiny file with the SDK's own wrappers, for several
+# Clang builds, and prints the ELF OS/ABI of the object and of the linked library.
+# tools/check-core.py and the console's core loader both require OS/ABI "UNIX - FreeBSD".
+name: Diagnose toolchain
+
+on: workflow_dispatch
+
+jobs:
+  probe:
+    name: clang ${{ matrix.clang }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        clang: [ubuntu, '18', '19', '20']   # 'ubuntu' = Ubuntu's own clang-18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: PS5_RetroArch
+
+      - name: Read the pinned SDK revision
+        id: sdk
+        run: |
+          rev=$(sed -n 's/^sdk_revision=\([0-9a-f]\{40\}\).*/\1/p' \
+                  PS5_RetroArch/tools/setup-native-dependencies.sh)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: mihawk-99/PS5_PayloadSDK
+          ref: ${{ steps.sdk.outputs.rev }}
+          path: PS5_PayloadSDK
+
+      - name: Install Clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wget unzip make cmake \
+            lsb-release software-properties-common gnupg ca-certificates
+          if [[ '${{ matrix.clang }}' == ubuntu ]]; then
+            sudo apt-get install -y clang clang-18 lld-18 llvm-18
+          else
+            wget -q https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            sudo ./llvm.sh '${{ matrix.clang }}'
+            sudo apt-get install -y "lld-${{ matrix.clang }}"
+            sudo update-alternatives --install /usr/bin/clang clang \
+              "/usr/bin/clang-${{ matrix.clang }}" 100
+            sudo update-alternatives --set clang "/usr/bin/clang-${{ matrix.clang }}"
+          fi
+          /usr/bin/clang --version
+
+      - name: Bootstrap the PS5 SDK
+        working-directory: PS5_RetroArch
+        env:
+          PS5_PAYLOAD_SDK_FORK: ${{ github.workspace }}/PS5_PayloadSDK
+        run: bash tools/setup-native-dependencies.sh
+
+      - name: What the SDK provides
+        run: |
+          sdk="$GITHUB_WORKSPACE/PS5_RetroArch/.deps/native/ps5-payload-sdk"
+          ls -l "$sdk/bin"
+          for t in prospero-clang prospero-lld; do
+            echo "=== $t"; file -L "$sdk/bin/$t" || true
+            head -c 1500 "$sdk/bin/$t" | strings | head -30 || true
+          done
+
+      - name: Compile, link, and read the OS/ABI
+        if: always()
+        working-directory: PS5_RetroArch
+        env:
+          PS5_PAYLOAD_SDK: ${{ github.workspace }}/PS5_RetroArch/.deps/native/ps5-payload-sdk
+          PS5_CLANG: /usr/bin/clang
+        run: |
+          set +e
+          sdk="$PS5_PAYLOAD_SDK"
+          mkdir -p /tmp/probe && cd /tmp/probe
+          printf 'int retro_api_version(void){return 1;}\n' > t.c
+          "$sdk/bin/prospero-clang" -O2 -fPIC -c t.c -o t.o
+          echo "--- object:"; readelf -h t.o | grep -E 'OS/ABI|Machine|Type'
+          echo "--- link (verbose):"
+          "$sdk/bin/prospero-clang" -v -shared -fPIC -nostdlib -nodefaultlibs \
+            -Wl,-z,undefs -Wl,--build-id=sha1 \
+            -Wl,-T,"$GITHUB_WORKSPACE/PS5_RetroArch/tooling/native/ps5-core.ld" \
+            t.o -lkernel_web -lSceLibcInternal -lScePosixForWebKit -o t.so 2>&1 \
+            | grep -i -E 'lld|ld\.|linker|error|warning' | head -20
+          echo "--- library:"; readelf -h t.so | grep -E 'OS/ABI|Machine|Type'
+          echo "--- first 8 bytes (want 7f 45 4c 46 02 01 01 09):"
+          head -c 8 t.so | xxd
