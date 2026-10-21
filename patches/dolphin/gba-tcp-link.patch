@@ -1,0 +1,110 @@
+diff --git a/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp b/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp
+index ef8b908..00d4701 100644
+--- a/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp
++++ b/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp
+@@ -4,6 +4,7 @@
+ #include "Core/HW/SI/SI_DeviceGBA.h"
+ 
+ #include <cstddef>
++#include <cstdio>
+ #include <cstring>
+ #include <memory>
+ #include <mutex>
+@@ -47,11 +48,25 @@ static void GBAConnectionWaiter()
+ 
+   // "dolphin gba"
+   if (server.listen(0xd6ba) != sf::Socket::Status::Done)
++  {
++    // Silent before: the emulator then simply never connects.
++    ERROR_LOG_FMT(SERIALINTERFACE, "GBA (TCP): cannot listen on port {}", 0xd6ba);
++    std::fprintf(stderr, "dolphin GBA (TCP): cannot listen on port %d\n", 0xd6ba);
+     return;
++  }
+ 
+   // "clock"
+   if (clock_server.listen(0xc10c) != sf::Socket::Status::Done)
++  {
++    ERROR_LOG_FMT(SERIALINTERFACE, "GBA (TCP): cannot listen on port {}", 0xc10c);
++    std::fprintf(stderr, "dolphin GBA (TCP): cannot listen on port %d\n", 0xc10c);
+     return;
++  }
++
++  NOTICE_LOG_FMT(SERIALINTERFACE, "GBA (TCP): listening on ports {} (data) and {} (clock)", 0xd6ba,
++                 0xc10c);
++  std::fprintf(stderr, "dolphin GBA (TCP): listening on ports %d (data) and %d (clock)\n", 0xd6ba,
++               0xc10c);
+ 
+   server.setBlocking(false);
+   clock_server.setBlocking(false);
+diff --git a/Source/Core/DolphinLibretro/Input.cpp b/Source/Core/DolphinLibretro/Input.cpp
+index 5250054..0602a11 100644
+--- a/Source/Core/DolphinLibretro/Input.cpp
++++ b/Source/Core/DolphinLibretro/Input.cpp
+@@ -59,6 +59,12 @@
+ #define RETRO_DEVICE_WIIMOTE_MP_CC ((10 << 8) | RETRO_DEVICE_JOYPAD)
+ #define RETRO_DEVICE_WIIMOTE_MP_CC_PRO ((11 << 8) | RETRO_DEVICE_JOYPAD)
+ 
++// GameCube only: a Game Boy Advance on the link cable, reached over TCP by an emulator
++// such as mGBA (Core/HW/SI/SI_DeviceGBA.cpp: Dolphin listens on ports 0xD6BA and 0xC10C
++// and the emulator connects to it). It takes no input, so its base class is NONE, as
++// RETRO_DEVICE_REAL_WIIMOTE's is.
++#define RETRO_DEVICE_GBA_TCP ((12 << 8) | RETRO_DEVICE_NONE)
++
+ /// The same remote with the dongle taken off, so everything downstream stays
+ /// written against the five original ids.
+ static inline unsigned wiimote_base_device(unsigned device)
+@@ -628,11 +634,17 @@ void InitStage2()
+   }
+   else
+   {
++    // A GameCube game's ports can also hold a GBA (TCP): the link cable.
++    static const struct retro_controller_description gc_desc[] = {
++        {"GameCube Controller", RETRO_DEVICE_JOYPAD},
++        {"GBA (TCP)", RETRO_DEVICE_GBA_TCP},
++    };
++
+     static const struct retro_controller_info ports[] = {
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
+         {0},
+     };
+ 
+@@ -1144,9 +1156,24 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+   if (((!system.IsWii() || !altGCPorts) && port > 3) || port > 7)
+     return;
+ 
++  // The link cable is a GameCube feature; a saved choice does not carry over to a Wii game.
++  if (device == RETRO_DEVICE_GBA_TCP && system.IsWii())
++    device = RETRO_DEVICE_JOYPAD;
++
+   Libretro::Input::input_types[port] = device;
+   auto& si = Core::System::GetInstance().GetSerialInterface();
+ 
++  if (device == RETRO_DEVICE_GBA_TCP)
++  {
++    // SI_DeviceGBA.cpp starts listening when the device is created. Choosing a controller
++    // again replaces it (retro_set_controller_port_device_gc).
++    NOTICE_LOG_FMT(BOOT, "Port {}: GBA (TCP), Dolphin listens on 54970 (data) and 49420 (clock)",
++                   port + 1);
++    Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_GC_GBA);
++    si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
++    return;
++  }
++
+   if (device == RETRO_DEVICE_NONE)
+   {
+     if (system.IsWii() && port < 4)
+@@ -1209,6 +1236,7 @@ void UpdateInputDescriptors()
+       break;
+ 
+     case RETRO_DEVICE_REAL_WIIMOTE:
++    case RETRO_DEVICE_GBA_TCP:
+     case RETRO_DEVICE_NONE:
+       continue;
+ 
