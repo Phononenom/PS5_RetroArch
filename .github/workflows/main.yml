@@ -1,7 +1,7 @@
 # Builds only the Dolphin libretro core for the PS5 title: no Vulkan driver, no
 # frontend, none of the other 32 cores. Put this file at
 # .github/workflows/build-dolphin-core.yml in your fork of mihawk-99/PS5_RetroArch,
-# after committing patches/dolphin/gba-tcp-link.patch and the tools/build-dolphin.sh
+# after committing patches/dolphin/gba-link.patch and the tools/build-dolphin.sh
 # change. Run it from the Actions tab (Run workflow).
 #
 # Clang 20 is required: only its PS5 driver links with -m elf_x86_64_fbsd and the
@@ -16,6 +16,10 @@ on:
         description: 'Also build with ps5-port.patch alone (no GBA TCP patch)'
         type: boolean
         default: false
+      mgba:
+        description: 'Build libmgba in (USE_MGBA=ON): GBA (Integrated), shown in a browser on port 6771'
+        type: boolean
+        default: true
   push:
     paths:
       - 'patches/dolphin/**'
@@ -34,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.baseline && '[{"variant":"gba-tcp","no_gba_tcp":""},{"variant":"baseline","no_gba_tcp":"1"}]' || '[{"variant":"gba-tcp","no_gba_tcp":""}]') }}
+        include: ${{ fromJSON(inputs.baseline && '[{"variant":"gba-link","no_gba_link":""},{"variant":"baseline","no_gba_link":"1"}]' || '[{"variant":"gba-link","no_gba_link":""}]') }}
     steps:
       - name: Free disk space
         run: |
@@ -84,8 +88,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-dolphin-${{ matrix.variant }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
-          restore-keys: ccache-dolphin-${{ matrix.variant }}-clang${{ env.CLANG_VERSION }}-
+          key: ccache-dolphin-${{ matrix.variant }}${{ inputs.mgba && '-mgba' || '' }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
+          restore-keys: ccache-dolphin-${{ matrix.variant }}${{ inputs.mgba && '-mgba' || '' }}-clang${{ env.CLANG_VERSION }}-
 
       - name: Bootstrap the PS5 SDK
         working-directory: PS5_RetroArch
@@ -98,7 +102,8 @@ jobs:
         env:
           PS5_PAYLOAD_SDK: ${{ github.workspace }}/PS5_RetroArch/.deps/native/ps5-payload-sdk
           PS5_CLANG: /usr/bin/clang
-          DOLPHIN_NO_GBA_TCP: ${{ matrix.no_gba_tcp }}
+          DOLPHIN_NO_GBA_LINK: ${{ matrix.no_gba_link }}
+          DOLPHIN_USE_MGBA: ${{ inputs.mgba && '1' || '' }}
           JOBS: 4
         run: bash tools/build-dolphin.sh
 
@@ -108,7 +113,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-dolphin-${{ matrix.variant }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
+          key: ccache-dolphin-${{ matrix.variant }}${{ inputs.mgba && '-mgba' || '' }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
 
       - name: Collect output
         working-directory: PS5_RetroArch
@@ -123,6 +128,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dolphin_libretro-${{ matrix.variant }}
+          name: dolphin_libretro-${{ matrix.variant }}${{ inputs.mgba && '-mgba' || '' }}
           path: PS5_RetroArch/out/
           if-no-files-found: error
