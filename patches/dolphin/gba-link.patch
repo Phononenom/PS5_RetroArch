@@ -1,0 +1,1471 @@
+diff --git a/Source/Core/Core/HW/GBAExternalKeys.h b/Source/Core/Core/HW/GBAExternalKeys.h
+new file mode 100644
+index 0000000..2333f30
+--- /dev/null
++++ b/Source/Core/Core/HW/GBAExternalKeys.h
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <atomic>
++
++#include "Common/CommonTypes.h"
++
++namespace HW::GBA
++{
++// Buttons held on a GBA from outside the emulated controller (the libretro port's browser
++// page), as mGBA's key mask: A, B, Select, Start, Right, Left, Up, Down, R, L = bits 0..9.
++// OR-ed into the keys the integrated GBA is given (SI_DeviceGBAEmu.cpp).
++inline std::atomic<u16>& ExternalKeys(int device_number)
++{
++  static std::atomic<u16> keys[4]{};
++  return keys[device_number & 3];
++}
++}  // namespace HW::GBA
+diff --git a/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp b/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp
+index ef8b908..30b9127 100644
+--- a/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp
++++ b/Source/Core/Core/HW/SI/SI_DeviceGBA.cpp
+@@ -3,7 +3,10 @@
+ 
+ #include "Core/HW/SI/SI_DeviceGBA.h"
+ 
++#include <atomic>
++#include <chrono>
+ #include <cstddef>
++#include <cstdio>
+ #include <cstring>
+ #include <memory>
+ #include <mutex>
+@@ -30,6 +33,19 @@ std::mutex s_cs_gba;
+ std::mutex s_cs_gba_clk;
+ int s_num_connected;
+ Common::Flag s_server_running;
++
++// Diagnostics for the TCP link (stderr is the PS5 title's trace file). The protocol
++// logging in this file is compiled out of release builds, so these say what happens.
++std::atomic<int> s_log_budget{96};  // transactions described in full, then summaries
++std::atomic<u32> s_txn{0};
++std::atomic<u32> s_replies{0};
++std::atomic<u32> s_misses{0};
++std::chrono::steady_clock::time_point s_sent_at;
++
++// Upstream only waits for a reply once one has been seen (m_booted), and polls once,
++// moments after sending, until then. Over a network the first reply arrives later than
++// that and is discarded by Flush(), so the link would never start. Wait this long.
++constexpr int FIRST_REPLY_WAIT_MS = 50;
+ }  // namespace
+ 
+ constexpr auto SEND_MAX_SIZE = 5, RECV_MAX_SIZE = 5;
+@@ -47,11 +63,25 @@ static void GBAConnectionWaiter()
+ 
+   // "dolphin gba"
+   if (server.listen(0xd6ba) != sf::Socket::Status::Done)
++  {
++    // Silent before: the emulator then simply never connects.
++    ERROR_LOG_FMT(SERIALINTERFACE, "GBA (TCP): cannot listen on port {}", 0xd6ba);
++    std::fprintf(stderr, "dolphin GBA (TCP): cannot listen on port %d\n", 0xd6ba);
+     return;
++  }
+ 
+   // "clock"
+   if (clock_server.listen(0xc10c) != sf::Socket::Status::Done)
++  {
++    ERROR_LOG_FMT(SERIALINTERFACE, "GBA (TCP): cannot listen on port {}", 0xc10c);
++    std::fprintf(stderr, "dolphin GBA (TCP): cannot listen on port %d\n", 0xc10c);
+     return;
++  }
++
++  NOTICE_LOG_FMT(SERIALINTERFACE, "GBA (TCP): listening on ports {} (data) and {} (clock)", 0xd6ba,
++                 0xc10c);
++  std::fprintf(stderr, "dolphin GBA (TCP): listening on ports %d (data) and %d (clock)\n", 0xd6ba,
++               0xc10c);
+ 
+   server.setBlocking(false);
+   clock_server.setBlocking(false);
+@@ -61,6 +91,7 @@ static void GBAConnectionWaiter()
+   {
+     if (server.accept(*new_client) == sf::Socket::Status::Done)
+     {
++      std::fprintf(stderr, "dolphin GBA (TCP): data connection accepted\n");
+       std::lock_guard lk(s_cs_gba);
+       s_waiting_socks.push(std::move(new_client));
+ 
+@@ -68,6 +99,7 @@ static void GBAConnectionWaiter()
+     }
+     if (clock_server.accept(*new_client) == sf::Socket::Status::Done)
+     {
++      std::fprintf(stderr, "dolphin GBA (TCP): clock connection accepted\n");
+       std::lock_guard lk(s_cs_gba_clk);
+       s_waiting_clocks.push(std::move(new_client));
+ 
+@@ -122,6 +154,9 @@ GBASockServer::~GBASockServer()
+ 
+ void GBASockServer::Disconnect()
+ {
++  if (m_client || m_clock_sync)
++    std::fprintf(stderr, "dolphin GBA (TCP): disconnected (data %d, clock %d)\n", m_client ? 1 : 0,
++                 m_clock_sync ? 1 : 0);
+   if (m_client)
+   {
+     s_num_connected--;
+@@ -140,8 +175,12 @@ void GBASockServer::Disconnect()
+ void GBASockServer::ClockSync(Core::System& system)
+ {
+   if (!m_clock_sync)
+-    if (!(m_clock_sync = GetNextClock()))
++  {
++    m_clock_sync = GetNextClock();
++    if (!m_clock_sync)
+       return;
++    std::fprintf(stderr, "dolphin GBA (TCP): clock socket attached\n");
++  }
+ 
+   const auto& core_timing = system.GetCoreTiming();
+ 
+@@ -180,7 +219,10 @@ bool GBASockServer::Connect()
+   {
+     m_client = GetNextSock();
+     if (m_client)
++    {
+       m_client->setBlocking(false);
++      std::fprintf(stderr, "dolphin GBA (TCP): data socket attached\n");
++    }
+   }
+   return IsConnected();
+ }
+@@ -222,6 +264,12 @@ int GBASockServer::Receive(u8* si_buffer, u8 bytes)
+     selector.add(*m_client);
+     (void)selector.wait(sf::milliseconds(1000));
+   }
++  else
++  {
++    sf::SocketSelector selector;
++    selector.add(*m_client);
++    (void)selector.wait(sf::milliseconds(FIRST_REPLY_WAIT_MS));
++  }
+ 
+   size_t num_received = 0;
+   std::array<u8, RECV_MAX_SIZE> recv_data;
+@@ -279,6 +327,8 @@ int CSIDevice_GBA::RunBuffer(u8* buffer, int request_length)
+ #endif
+       m_sock_server.Flush();  // Clear out any replies we might have timed out waiting for
+       m_sock_server.Send(buffer);
++      s_sent_at = std::chrono::steady_clock::now();
++      ++s_txn;
+     }
+     else
+     {
+@@ -320,6 +370,39 @@ int CSIDevice_GBA::RunBuffer(u8* buffer, int request_length)
+     const int num_data_received = m_sock_server.Receive(buffer, bytes);
+ 
+     m_next_action = NextAction::SendCommand;
++
++    {
++      const auto waited_us = std::chrono::duration_cast<std::chrono::microseconds>(
++                                 std::chrono::steady_clock::now() - s_sent_at)
++                                 .count();
++      const u32 txn = s_txn.load();
++      if (num_data_received == 0)
++        ++s_misses;
++      else
++        ++s_replies;
++      if (s_log_budget.fetch_sub(1) > 0)
++      {
++        if (num_data_received == 0)
++        {
++          std::fprintf(stderr, "dolphin GBA (TCP): #%u cmd %02x: no reply after %lld us\n", txn,
++                       static_cast<u8>(m_last_cmd), static_cast<long long>(waited_us));
++        }
++        else
++        {
++          std::fprintf(stderr,
++                       "dolphin GBA (TCP): #%u cmd %02x: %d bytes %02x %02x %02x %02x %02x after "
++                       "%lld us\n",
++                       txn, static_cast<u8>(m_last_cmd), num_data_received, buffer[0], buffer[1],
++                       buffer[2], buffer[3], buffer[4], static_cast<long long>(waited_us));
++        }
++      }
++      else if (txn % 200 == 0)
++      {
++        std::fprintf(stderr, "dolphin GBA (TCP): %u transactions, %u replies, %u without\n", txn,
++                     s_replies.load(), s_misses.load());
++      }
++    }
++
+     if (num_data_received == 0)
+       return -1;
+ #ifdef _DEBUG
+diff --git a/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp b/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp
+index 36ccc15..e9642a1 100644
+--- a/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp
++++ b/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp
+@@ -13,6 +13,7 @@
+ #include "Core/Core.h"
+ #include "Core/CoreTiming.h"
+ #include "Core/HW/GBACore.h"
++#include "Core/HW/GBAExternalKeys.h"
+ #include "Core/HW/GBAPad.h"
+ #include "Core/HW/SI/SI.h"
+ #include "Core/HW/SI/SI_DeviceGCController.h"
+@@ -59,7 +60,8 @@ int CSIDevice_GBAEmu::RunBuffer(u8* buffer, int request_length)
+ #endif
+     m_last_cmd = static_cast<EBufferCommands>(buffer[0]);
+     m_timestamp_sent = m_system.GetCoreTiming().GetTicks();
+-    m_core->SendJoybusCommand(m_timestamp_sent, TransferInterval(), buffer, m_keys);
++    m_core->SendJoybusCommand(m_timestamp_sent, TransferInterval(), buffer,
++                              m_keys | HW::GBA::ExternalKeys(m_device_number).load());
+ 
+     auto& si = m_system.GetSerialInterface();
+     si.RemoveEvent(m_device_number);
+@@ -167,7 +169,9 @@ void CSIDevice_GBAEmu::DoState(PointerWrap& p)
+ 
+ void CSIDevice_GBAEmu::OnEvent(u64 userdata, s64 cycles_late)
+ {
+-  m_core->SyncJoybus(m_system.GetCoreTiming().GetTicks() + userdata, m_keys);
++  // Buttons held from outside the emulated controller (the libretro port's browser page).
++  m_core->SyncJoybus(m_system.GetCoreTiming().GetTicks() + userdata,
++                     m_keys | HW::GBA::ExternalKeys(m_device_number).load());
+ 
+   const auto num_cycles = userdata + GetSyncInterval(m_system.GetSystemTimers());
+   m_system.GetSerialInterface().ScheduleEvent(m_device_number, num_cycles);
+diff --git a/Source/Core/DolphinLibretro/Boot.cpp b/Source/Core/DolphinLibretro/Boot.cpp
+index c532810..6a2c047 100644
+--- a/Source/Core/DolphinLibretro/Boot.cpp
++++ b/Source/Core/DolphinLibretro/Boot.cpp
+@@ -298,6 +298,16 @@ bool retro_load_game(const struct retro_game_info* game)
+   Discord::SetDiscordPresenceEnabled(false);
+   Common::SetEnableAlert(false);
+   Common::SetAbortOnPanicAlert(false);
++#ifdef HAS_LIBMGBA
++  // The integrated GBA reads its BIOS from the user directory's GBA folder. Also accept the
++  // gba_bios.bin that RetroArch's own mGBA core uses, in the system directory.
++  if (system_dir && *system_dir)
++  {
++    const std::string system_bios = std::string(system_dir) + DIR_SEP "gba_bios.bin";
++    if (!File::Exists(File::GetUserPath(F_GBABIOS_IDX)) && File::Exists(system_bios))
++      File::SetUserPath(F_GBABIOS_IDX, system_bios);
++  }
++#endif
+   Common::RegisterMsgAlertHandler([](const char* caption, const char* text,
+     bool yes_no, Common::MsgType style) -> bool
+   {
+diff --git a/Source/Core/DolphinLibretro/CMakeLists.txt b/Source/Core/DolphinLibretro/CMakeLists.txt
+index 50497a7..ae6767c 100644
+--- a/Source/Core/DolphinLibretro/CMakeLists.txt
++++ b/Source/Core/DolphinLibretro/CMakeLists.txt
+@@ -2,6 +2,7 @@
+ add_library(dolphin_libretro SHARED
+   Audio.cpp
+   Boot.cpp
++  GBAWeb.cpp
+   Host.cpp
+   Input.cpp
+   Log.cpp
+diff --git a/Source/Core/DolphinLibretro/GBAWeb.cpp b/Source/Core/DolphinLibretro/GBAWeb.cpp
+new file mode 100644
+index 0000000..2334e22
+--- /dev/null
++++ b/Source/Core/DolphinLibretro/GBAWeb.cpp
+@@ -0,0 +1,984 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++//
++// The integrated GBA's screen and buttons in a browser: http://<console>:6771/
++//
++// The GBA runs in-process (HW::GBA::Core); this only watches it. Its finished frames go to a
++// one-slot mailbox (the newest frame wins), a stream thread per browser sends them, and the
++// page's buttons come back as a key mask that SI_DeviceGBAEmu ORs into the GBA's keys. Nothing
++// here can make the emulation wait: the GBA thread only takes a mutex for a memcpy-sized copy,
++// every socket is non-blocking, and a browser that stops reading is dropped after two seconds.
++// Plain POSIX sockets, not SFML: SFML's listener cannot set SO_REUSEADDR, and without it the
++// port stays unusable for a minute after the content closes.
++//
++// Protocol: GET /  the page;  GET /frame?after=<seq>&p=<port 1-4>  one frame newer than seq (the
++// page asks for the next one when it has drawn the last, so it sets the pace and nothing can
++// back up): 200 with a fixed length body and X-Seq, or 204 after a second of nothing new;
++// GET /stream?p=&div=  the same frames as one never-ending response;  a frame is 'G' 'B' 'A' '1',
++// width (u16 LE), height (u16 LE), then width*height u16 pixels (bit 15 unused, bits 14-10 blue,
++// 9-5 green, 4-0 red: the GBA's own 15-bit colour, so nothing is lost);  GET /k?m=<mask>&p=<port>
++// the held buttons (mGBA's key bits), 204 on a kept-alive connection;  GET /state  the active
++// ports.
++
++#ifdef HAS_LIBMGBA
++
++#include "GBAWeb.h"
++
++#ifdef _WIN32
++
++// The browser page is for the console build.
++namespace Libretro::GBAWeb
++{
++std::unique_ptr<GBAHostInterface> CreateHost(std::weak_ptr<HW::GBA::Core>)
++{
++  return nullptr;
++}
++}  // namespace Libretro::GBAWeb
++
++#else
++
++#include <algorithm>
++#include <cerrno>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <list>
++#include <mutex>
++#include <span>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <sys/select.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#include "Common/CommonTypes.h"
++#include "Core/HW/GBACore.h"
++#include "Core/HW/GBAExternalKeys.h"
++
++namespace Libretro::GBAWeb
++{
++namespace
++{
++constexpr u16 PORT = 6771;
++constexpr int MAX_DEVICES = 4;
++constexpr std::size_t MAX_CLIENTS = 12;
++constexpr int STALL_LIMIT_MS = 2000;     // a client that takes nothing for this long is dropped
++constexpr int KEY_EXPIRY_MS = 2000;      // a held button the page stopped refreshing is released
++constexpr int KEEPALIVE_IDLE_MS = 15000;
++constexpr int FRAME_WAIT_MS = 1000;      // how long /frame waits for something new
++constexpr int VIEWER_GRACE_MS = 3000;    // frames are converted this long after a /frame request
++
++constexpr char PAGE[] = R"HTML(<!doctype html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
++<title>GBA - PS5 RetroArch</title>
++<style>
++:root{color-scheme:dark;--bg:#101114;--panel:#1b1d23;--key:#2a2d36;--keyon:#4b86ff;--fg:#e6e8ee;--dim:#8a8f9c}
++*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:none;user-select:none;-webkit-user-select:none}
++html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif;overflow:hidden}
++#app{display:flex;flex-direction:column;height:100%;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
++#bar{display:flex;gap:10px;align-items:center;padding:6px 10px;color:var(--dim);font-size:12px}
++#status{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
++#bar select,#bar button{background:var(--panel);color:var(--fg);border:1px solid #333;border-radius:6px;padding:3px 7px;font:inherit}
++#screen{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
++body.nopad #pad{display:none}
++canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#000;border-radius:4px;flex:none}
++#pad{display:grid;grid-template-columns:1fr 1fr 1fr;align-items:center;gap:6px;padding:8px 14px 14px;max-width:760px;width:100%;margin:0 auto}
++.grp{position:relative;height:150px}
++.k{position:absolute;display:flex;align-items:center;justify-content:center;background:var(--key);border-radius:12px;font-weight:600;font-size:15px;color:var(--fg)}
++.k.on{background:var(--keyon)}
++#dpad .k{width:50px;height:50px}
++#up{left:50px;top:0}#down{left:50px;top:100px}#left{left:0;top:50px}#right{left:100px;top:50px}
++#face .k{width:62px;height:62px;border-radius:50%}
++#b{left:6px;top:62px}#a{left:80px;top:30px}
++#mid{display:flex;flex-direction:column;align-items:center;justify-content:space-between;height:150px;padding:6px 0}
++#mid .k{position:static;width:84px;height:34px;font-size:12px}
++.sh{display:flex;justify-content:space-between;grid-column:1/4;gap:10px}
++.sh .k{position:static;flex:1;height:40px}
++@media (orientation:landscape) and (max-height:520px){#pad{position:fixed;left:0;right:0;bottom:0;max-width:none;padding:0 18px 10px;pointer-events:none}#pad .k{pointer-events:auto;opacity:.82}.sh{position:fixed;top:44px;left:18px;right:18px;grid-column:auto;pointer-events:none}.sh .k{flex:0 0 110px;pointer-events:auto}}
++</style>
++</head>
++<body>
++<div id="app">
++ <div id="bar">
++  <span id="status">Connecting...</span>
++  <select id="fps" title="Frame rate"><option value="1">60 fps</option><option value="2" selected>30 fps</option><option value="3">20 fps</option><option value="4">15 fps</option></select>
++  <button id="swap" title="Swap red and blue if colours look wrong">R/B</button>
++  <button id="padbtn" title="Show or hide the on-screen buttons">Buttons</button>
++  <button id="full" title="Fullscreen">&#9974;</button>
++ </div>
++ <div id="screen"><canvas id="cv" width="240" height="160"></canvas></div>
++ <div id="pad">
++  <div class="sh"><div class="k" data-k="9">L</div><div class="k" data-k="8">R</div></div>
++  <div class="grp" id="dpad"><div class="k" id="up" data-k="6">&#9650;</div><div class="k" id="down" data-k="7">&#9660;</div><div class="k" id="left" data-k="5">&#9664;</div><div class="k" id="right" data-k="4">&#9654;</div></div>
++  <div id="mid"><div class="k" data-k="2">SELECT</div><div class="k" data-k="3">START</div></div>
++  <div class="grp" id="face"><div class="k" id="b" data-k="1">B</div><div class="k" id="a" data-k="0">A</div></div>
++ </div>
++</div>
++<script>
++(function(){
++'use strict';
++var q=new URLSearchParams(location.search), port=q.get('p');
++var statusEl=document.getElementById('status'), cv=document.getElementById('cv'), ctx=cv.getContext('2d');
++var fpsSel=document.getElementById('fps'), swapBtn=document.getElementById('swap');
++function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
++var swap=store('gba.swap')==='1'; var div=store('gba.div')||'2'; fpsSel.value=div;
++swapBtn.onclick=function(){swap=!swap;store('gba.swap',swap?'1':'0')};
++fpsSel.onchange=function(){div=fpsSel.value;store('gba.div',div);restart()};
++function say(t){statusEl.textContent=t}
++
++/* ---- input: one mask from keyboard + touch + gamepad, GBA key bits (A,B,Select,Start,Right,Left,Up,Down,R,L = 0..9) ---- */
++var kbd=0, touch={}, pad=0, sentMask=-1, inflight=false, dirty=false;
++function mask(){var m=kbd|pad;for(var id in touch)m|=touch[id];return m}
++var kmap={'ArrowUp':6,'ArrowDown':7,'ArrowLeft':5,'ArrowRight':4,'KeyX':0,'KeyZ':1,'KeyA':9,'KeyS':8,'Enter':3,'Backspace':2,'ShiftRight':2,'ShiftLeft':2};
++addEventListener('keydown',function(e){var b=kmap[e.code];if(b===undefined)return;e.preventDefault();kbd|=1<<b;push()});
++addEventListener('keyup',function(e){var b=kmap[e.code];if(b===undefined)return;e.preventDefault();kbd&=~(1<<b);push()});
++addEventListener('blur',function(){kbd=0;touch={};push();paint()});
++function paint(){var m=mask();document.querySelectorAll('[data-k]').forEach(function(el){el.classList.toggle('on',!!(m&(1<<el.dataset.k)))})}
++document.querySelectorAll('[data-k]').forEach(function(el){
++ var bit=1<<el.dataset.k;
++ el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);touch[e.pointerId]=(touch[e.pointerId]||0)|bit;push()});
++ var up=function(e){if(touch[e.pointerId]===undefined)return;touch[e.pointerId]&=~bit;if(!touch[e.pointerId])delete touch[e.pointerId];push()};
++ el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);el.addEventListener('lostpointercapture',up);
++});
++function pollPad(){
++ var gps=navigator.getGamepads?navigator.getGamepads():[],m=0,b=null;
++ function p(n){return b&&b[n]&&b[n].pressed}
++ for(var i=0;i<gps.length;i++){var g=gps[i];if(!g||!g.connected)continue;b=g.buttons;
++  if(p(1))m|=1;if(p(0))m|=2;if(p(8))m|=4;if(p(9))m|=8;
++  if(p(15))m|=16;if(p(14))m|=32;if(p(12))m|=64;if(p(13))m|=128;
++  if(p(5))m|=256;if(p(4))m|=512;
++  var x=g.axes[0]||0,y=g.axes[1]||0;if(x>.5)m|=16;if(x<-.5)m|=32;if(y<-.5)m|=64;if(y>.5)m|=128;}
++ if(m!==pad){pad=m;push()}
++ requestAnimationFrame(pollPad);
++}
++requestAnimationFrame(pollPad);
++function push(){paint();dirty=true;pump()}
++function pump(){
++ if(inflight||!dirty)return;dirty=false;var m=mask();sentMask=m;inflight=true;
++ fetch('/k?m='+m+(port?'&p='+port:''),{cache:'no-store'}).catch(function(){}).then(function(){inflight=false;pump()});
++}
++setInterval(function(){if(mask()!==0){dirty=true;pump()}},400); /* keeps a held button alive; the server releases silent ones */
++
++/* ---- layout: the biggest crisp size that fits, and the buttons only where they help ---- */
++var padBtn=document.getElementById('padbtn'), fullBtn=document.getElementById('full'), box=document.getElementById('screen');
++var coarse=!!(window.matchMedia&&matchMedia('(pointer:coarse)').matches);
++var padOn=store('gba.pad'); padOn=padOn===null?coarse:padOn==='1';
++function applyPad(){document.body.classList.toggle('nopad',!padOn);fit()}
++padBtn.onclick=function(){padOn=!padOn;store('gba.pad',padOn?'1':'0');applyPad()};
++fullBtn.onclick=function(){try{if(document.fullscreenElement)document.exitFullscreen();else document.documentElement.requestFullscreen()}catch(e){}};
++function fit(){
++ var aw=box.clientWidth, ah=box.clientHeight, w=cv.width, h=cv.height;
++ if(aw<=0||ah<=0)return;
++ var dpr=window.devicePixelRatio||1, k=Math.floor(Math.min(aw*dpr/w,ah*dpr/h)), cw, ch;
++ if(k>=1){cw=w*k/dpr;ch=h*k/dpr}else{var f=Math.min(aw/w,ah/h);cw=w*f;ch=h*f}
++ cv.style.width=cw+'px';cv.style.height=ch+'px';
++}
++addEventListener('resize',fit);
++if(window.ResizeObserver)new ResizeObserver(fit).observe(box);
++applyPad();
++
++/* ---- video: one frame per request, 'GBA1' w(u16) h(u16) then w*h 16-bit pixels (0bbbbbgggggrrrrr).
++   The page asks for the next frame when it has drawn the last, so it sets the pace and nothing can
++   back up or stall; the server answers at once with a newer frame, or 204 after a second of none. ---- */
++var gen=0, seq=0, frames=0, drawn=false, t0=performance.now();
++var gap={'1':0,'2':33,'3':50,'4':67};
++function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}
++function draw(px,w,h){
++ if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;fit()}
++ var img=ctx.createImageData(w,h),d=img.data,n=w*h,s=swap;
++ for(var i=0,o=0;i<n;i++,o+=4){
++  var v=px[2*i]|(px[2*i+1]<<8),r=v&31,g=(v>>5)&31,b=(v>>10)&31;
++  r=(r<<3)|(r>>2);g=(g<<3)|(g>>2);b=(b<<3)|(b>>2);
++  d[o]=s?b:r;d[o+1]=g;d[o+2]=s?r:b;d[o+3]=255}
++ ctx.putImageData(img,0,0);
++ drawn=true;frames++;var t=performance.now();if(t-t0>1000){say('Live  '+Math.round(frames*1000/(t-t0))+' fps  '+w+'x'+h);frames=0;t0=t}
++}
++async function loop(my){
++ var fails=0, lastReq=0;
++ say('Connecting...');
++ while(my===gen){
++  var wait=(gap[div]||33)-(performance.now()-lastReq);
++  if(wait>0)await sleep(wait);
++  lastReq=performance.now();
++  try{
++   var res=await fetch('/frame?after='+seq+(port?'&p='+port:''),{cache:'no-store'});
++   if(my!==gen)return;
++   if(res.status===204){say(drawn?'Live  (screen unchanged)  '+cv.width+'x'+cv.height:'Waiting for the GBA... (start the Tingle Tuner or link in the game)');fails=0;continue}
++   if(!res.ok)throw new Error('HTTP '+res.status);
++   var buf=new Uint8Array(await res.arrayBuffer());
++   if(my!==gen)return;
++   if(buf.length<8||buf[0]!==71||buf[1]!==66||buf[2]!==65||buf[3]!==49)throw new Error('bad frame');
++   var w=buf[4]|(buf[5]<<8),h=buf[6]|(buf[7]<<8);
++   if(buf.length!==8+w*h*2)throw new Error('short frame');
++   seq=parseInt(res.headers.get('X-Seq')||'0',10)||0;
++   draw(buf.subarray(8),w,h);fails=0;
++  }catch(e){
++   if(my!==gen)return;
++   fails++;say('Disconnected ('+e.message+'). Retrying...');
++   await sleep(Math.min(2000,300*fails));
++  }
++ }
++}
++function restart(){gen++;seq=0;loop(gen)}
++restart();
++})();
++</script>
++</body>
++</html>
++)HTML";
++
++class Fd
++{
++public:
++  Fd() = default;
++  explicit Fd(int fd) : m_fd(fd) {}
++  Fd(const Fd&) = delete;
++  Fd& operator=(const Fd&) = delete;
++  Fd(Fd&& other) noexcept : m_fd(other.m_fd) { other.m_fd = -1; }
++  Fd& operator=(Fd&& other) noexcept
++  {
++    if (this != &other)
++    {
++      Reset();
++      m_fd = other.m_fd;
++      other.m_fd = -1;
++    }
++    return *this;
++  }
++  ~Fd() { Reset(); }
++  void Reset()
++  {
++    if (m_fd >= 0)
++    {
++      ::shutdown(m_fd, SHUT_RDWR);
++      ::close(m_fd);
++    }
++    m_fd = -1;
++  }
++  int Get() const { return m_fd; }
++  explicit operator bool() const { return m_fd >= 0; }
++
++private:
++  int m_fd = -1;
++};
++
++struct Slot
++{
++  bool active = false;
++  u16 width = 240;
++  u16 height = 160;
++  u32 seq = 0;
++  std::vector<u16> pixels;
++};
++
++struct Client
++{
++  std::thread thread;
++  std::atomic<bool> done{false};
++};
++
++struct State
++{
++  std::mutex lifecycle;  // Register / Unregister / start / stop
++  std::mutex m;          // the slots
++  std::condition_variable cv;
++  Slot slots[MAX_DEVICES];
++  int refs = 0;
++  std::atomic<int> viewers{0};              // open /stream connections
++  std::atomic<long long> last_view_ms{0};   // the latest /frame request
++  std::atomic<unsigned> frames_served{0};
++  std::atomic<unsigned> idle_polls{0};
++  std::atomic<unsigned long long> bytes_served{0};
++  std::atomic<long long> max_send_ms{0};
++  std::atomic<bool> stop{false};
++  std::atomic<long long> last_key_ms{0};
++  std::atomic<int> key_log_budget{12};
++  int listener = -1;
++  Fd listener_owner;
++  std::thread accept_thread;
++  std::list<Client> clients;  // the accept thread's, and StopServer's once that has been joined
++};
++
++// Never destroyed: the core's static destructors may run with nothing left to stop.
++State& S()
++{
++  static State* state = new State;
++  return *state;
++}
++
++long long NowMs()
++{
++  return std::chrono::duration_cast<std::chrono::milliseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++// ---- socket helpers: all sockets are non-blocking, every wait checks the stop flag ----
++
++#ifdef MSG_NOSIGNAL
++constexpr int SEND_FLAGS = MSG_NOSIGNAL;
++#else
++constexpr int SEND_FLAGS = 0;
++#endif
++
++void SetNonBlocking(int fd)
++{
++  const int flags = ::fcntl(fd, F_GETFL, 0);
++  if (flags != -1)
++    (void)::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
++}
++
++// True when fd has something to read (or has failed: the read then says so).
++bool WaitReadable(int fd, int timeout_ms)
++{
++  if (fd < 0 || fd >= FD_SETSIZE)
++    return false;
++  fd_set set;
++  FD_ZERO(&set);
++  FD_SET(fd, &set);
++  timeval tv{};
++  tv.tv_sec = timeout_ms / 1000;
++  tv.tv_usec = (timeout_ms % 1000) * 1000;
++  return ::select(fd + 1, &set, nullptr, nullptr, &tv) > 0;
++}
++
++Fd OpenListener(u16 port)
++{
++  Fd fd(::socket(AF_INET, SOCK_STREAM, 0));
++  if (!fd)
++    return {};
++  // Without this the port is unusable for about a minute after the content closes: the
++  // connections this server closed linger in TIME_WAIT.
++  const int yes = 1;
++  (void)::setsockopt(fd.Get(), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
++  sockaddr_in addr{};
++  addr.sin_family = AF_INET;
++  addr.sin_addr.s_addr = htonl(INADDR_ANY);
++  addr.sin_port = htons(port);
++  if (::bind(fd.Get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
++  {
++    std::fprintf(stderr, "dolphin GBA web: bind failed, errno %d\n", errno);
++    return {};
++  }
++  if (::listen(fd.Get(), 8) != 0)
++  {
++    std::fprintf(stderr, "dolphin GBA web: listen failed, errno %d\n", errno);
++    return {};
++  }
++  SetNonBlocking(fd.Get());
++  return fd;
++}
++
++bool SendAll(int fd, const void* data, std::size_t size)
++{
++  State& s = S();
++  const char* p = static_cast<const char*>(data);
++  std::size_t off = 0;
++  long long last_progress = NowMs();
++  while (off < size)
++  {
++    if (s.stop)
++      return false;
++    const ssize_t n = ::send(fd, p + off, size - off, SEND_FLAGS);
++    if (n > 0)
++    {
++      off += static_cast<std::size_t>(n);
++      last_progress = NowMs();
++      continue;
++    }
++    if (n < 0 && errno == EINTR)
++      continue;
++    // ENOBUFS / ENOMEM are the console's network stack running short of buffers for a moment.
++    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS && errno != ENOMEM)
++    {
++      std::fprintf(stderr, "dolphin GBA web: send failed, errno %d (%zu of %zu bytes sent)\n",
++                   errno, off, size);
++      return false;  // disconnected or error
++    }
++    if (NowMs() - last_progress > STALL_LIMIT_MS)
++    {
++      std::fprintf(stderr, "dolphin GBA web: client took nothing for %d ms (%zu of %zu bytes)\n",
++                   STALL_LIMIT_MS, off, size);
++      return false;
++    }
++    std::this_thread::sleep_for(std::chrono::milliseconds(2));
++  }
++  return true;
++}
++
++bool SendText(int fd, const std::string& text)
++{
++  return SendAll(fd, text.data(), text.size());
++}
++
++// Reads up to and including the blank line after a request's header into head; bytes after it
++// stay in buf for the next request on the connection.
++bool ReadHead(int fd, std::string& buf, std::string& head)
++{
++  State& s = S();
++  long long last_data = NowMs();
++  for (;;)
++  {
++    const std::size_t end = buf.find("\r\n\r\n");
++    if (end != std::string::npos)
++    {
++      head = buf.substr(0, end);
++      buf.erase(0, end + 4);
++      return true;
++    }
++    if (buf.size() > 8192 || s.stop || NowMs() - last_data > KEEPALIVE_IDLE_MS)
++      return false;
++    if (!WaitReadable(fd, 100))
++      continue;
++    char tmp[1024];
++    const ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
++    if (n > 0)
++    {
++      buf.append(tmp, static_cast<std::size_t>(n));
++      last_data = NowMs();
++    }
++    else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
++    {
++      return false;
++    }
++  }
++}
++
++struct Request
++{
++  std::string method;
++  std::string path;
++  std::string query;
++};
++
++bool ParseRequest(const std::string& head, Request& r)
++{
++  const std::string line = head.substr(0, head.find("\r\n"));
++  const std::size_t sp1 = line.find(' ');
++  if (sp1 == std::string::npos)
++    return false;
++  const std::size_t sp2 = line.find(' ', sp1 + 1);
++  if (sp2 == std::string::npos)
++    return false;
++  r.method = line.substr(0, sp1);
++  const std::string target = line.substr(sp1 + 1, sp2 - sp1 - 1);
++  const std::size_t qm = target.find('?');
++  r.path = target.substr(0, qm);
++  r.query = qm == std::string::npos ? std::string{} : target.substr(qm + 1);
++  return !r.path.empty() && r.path[0] == '/';
++}
++
++std::string QueryValue(const std::string& query, const std::string& key)
++{
++  std::size_t pos = 0;
++  while (pos <= query.size())
++  {
++    std::size_t amp = query.find('&', pos);
++    if (amp == std::string::npos)
++      amp = query.size();
++    const std::string pair = query.substr(pos, amp - pos);
++    const std::size_t eq = pair.find('=');
++    if (eq != std::string::npos && pair.compare(0, eq, key) == 0)
++      return pair.substr(eq + 1);
++    pos = amp + 1;
++  }
++  return {};
++}
++
++// A decimal number, or def if the text is empty or not one; never above max.
++unsigned ParseUInt(const std::string& text, unsigned def, unsigned max)
++{
++  if (text.empty() || text.size() > 10)
++    return def;
++  unsigned long long v = 0;
++  for (const char c : text)
++  {
++    if (c < '0' || c > '9')
++      return def;
++    v = v * 10 + static_cast<unsigned>(c - '0');
++  }
++  return static_cast<unsigned>(std::min<unsigned long long>(v, max));
++}
++
++// The controller port (1-4, as in RetroArch's menu) named in the request, as a device index;
++// -1 for "whichever GBA is active".
++int RequestedDevice(const Request& r)
++{
++  const unsigned port = ParseUInt(QueryValue(r.query, "p"), 0, 99);
++  return port >= 1 && port <= MAX_DEVICES ? static_cast<int>(port) - 1 : -1;
++}
++
++int LowestActive(const State& s)  // with s.m held
++{
++  for (int i = 0; i < MAX_DEVICES; ++i)
++  {
++    if (s.slots[i].active)
++      return i;
++  }
++  return -1;
++}
++
++std::string Header(int code, const char* reason, const char* type, std::size_t length,
++                   bool keep_alive, const std::string& extra = {})
++{
++  std::string h = "HTTP/1.1 " + std::to_string(code) + " " + reason + "\r\n";
++  if (type)
++    h += std::string("Content-Type: ") + type + "\r\n";
++  h += "Content-Length: " + std::to_string(length) + "\r\n";
++  h += "Cache-Control: no-store\r\n";
++  h += extra;
++  h += keep_alive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n";
++  return h;
++}
++
++// 'GBA1', width, height, then the pixels; with s.m held.
++void BuildFrameMessage(const Slot& slot, std::vector<u8>& msg)
++{
++  const std::size_t bytes = slot.pixels.size() * sizeof(u16);
++  msg.resize(8 + bytes);
++  msg[0] = 'G';
++  msg[1] = 'B';
++  msg[2] = 'A';
++  msg[3] = '1';
++  msg[4] = static_cast<u8>(slot.width & 0xFF);
++  msg[5] = static_cast<u8>(slot.width >> 8);
++  msg[6] = static_cast<u8>(slot.height & 0xFF);
++  msg[7] = static_cast<u8>(slot.height >> 8);
++  std::memcpy(msg.data() + 8, slot.pixels.data(), bytes);
++}
++
++// One frame newer than the request's `after`, or a 204 once FRAME_WAIT_MS has passed with
++// nothing new. False when the connection should be closed.
++bool ServeFrame(int sock, const Request& r)
++{
++  State& s = S();
++  const int wanted = RequestedDevice(r);
++  const u32 after = ParseUInt(QueryValue(r.query, "after"), 0, 0xFFFFFFFFu);
++
++  const long long arrived = NowMs();
++  if (arrived - s.last_view_ms.load() > VIEWER_GRACE_MS)
++    std::fprintf(stderr, "dolphin GBA web: a browser started polling frames\n");
++  s.last_view_ms = arrived;
++
++  std::vector<u8> msg;
++  u32 seq = after;
++  bool have = false;
++  {
++    std::unique_lock lock(s.m);
++    for (;;)
++    {
++      if (s.stop)
++        return false;
++      const int d = wanted >= 0 ? wanted : LowestActive(s);
++      if (d >= 0)
++      {
++        const Slot& slot = s.slots[d];
++        if (!slot.pixels.empty() && slot.seq != after)
++        {
++          BuildFrameMessage(slot, msg);
++          seq = slot.seq;
++          have = true;
++          break;
++        }
++      }
++      const long long left = FRAME_WAIT_MS - (NowMs() - arrived);
++      if (left <= 0)
++        break;
++      s.cv.wait_for(lock, std::chrono::milliseconds(std::min<long long>(left, 100)));
++    }
++  }
++  s.last_view_ms = NowMs();
++
++  const std::string seq_header = "X-Seq: " + std::to_string(seq) + "\r\n";
++  if (!have)
++  {
++    ++s.idle_polls;
++    return SendText(sock, Header(204, "No Content", nullptr, 0, true, seq_header));
++  }
++  const long long t0 = NowMs();
++  if (!SendText(sock, Header(200, "OK", "application/octet-stream", msg.size(), true, seq_header)) ||
++      !SendAll(sock, msg.data(), msg.size()))
++    return false;
++  const long long took = NowMs() - t0;
++  long long prev = s.max_send_ms.load();
++  while (took > prev && !s.max_send_ms.compare_exchange_weak(prev, took))
++  {
++  }
++  ++s.frames_served;
++  s.bytes_served += msg.size();
++  return true;
++}
++
++struct ViewerGuard
++{
++  std::atomic<int>& n;
++  explicit ViewerGuard(std::atomic<int>& v) : n(v) { ++n; }
++  ~ViewerGuard() { --n; }
++};
++
++void Stream(int sock, const Request& r)
++{
++  State& s = S();
++  const int wanted = RequestedDevice(r);
++  unsigned div = ParseUInt(QueryValue(r.query, "div"), 2, 6);
++  if (div == 0)
++    div = 1;
++
++  static constexpr char HEAD[] =
++      "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nCache-Control: no-store\r\n"
++      "X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
++  if (!SendAll(sock, HEAD, sizeof(HEAD) - 1))
++    return;
++
++  if (wanted >= 0)
++    std::fprintf(stderr, "dolphin GBA web: stream started (port %d, every %u frame)\n", wanted + 1,
++                 div);
++  else
++    std::fprintf(stderr, "dolphin GBA web: stream started (any port, every %u frame)\n", div);
++  const ViewerGuard guard(s.viewers);
++
++  u32 last_seq = 0;
++  int last_dev = -2;
++  long long last_sent = 0;
++  std::vector<u8> msg;
++  for (;;)
++  {
++    bool have = false;
++    {
++      std::unique_lock lock(s.m);
++      s.cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
++        if (s.stop)
++          return true;
++        const int d = wanted >= 0 ? wanted : LowestActive(s);
++        return d >= 0 && (d != last_dev || s.slots[d].seq != last_seq);
++      });
++      if (s.stop)
++        break;
++      const int d = wanted >= 0 ? wanted : LowestActive(s);
++      if (d >= 0)
++      {
++        const Slot& slot = s.slots[d];
++        if (d != last_dev)
++        {
++          last_dev = d;
++          last_seq = 0;
++        }
++        if (slot.seq != last_seq && !slot.pixels.empty())
++        {
++          BuildFrameMessage(slot, msg);
++          last_seq = slot.seq;
++          have = true;
++        }
++      }
++    }
++    // Paced by the clock: a remainder of the frame number can lock onto a value that never comes
++    // up when frames arrive in uneven bursts.
++    if (!have || NowMs() - last_sent < static_cast<long long>(div) * 1000 / 60)
++      continue;
++    last_sent = NowMs();
++    if (!SendAll(sock, msg.data(), msg.size()))
++      break;
++  }
++  std::fprintf(stderr, "dolphin GBA web: stream ended\n");
++}
++
++void HandleClient(Fd conn, Client* client)
++{
++  State& s = S();
++  const int sock = conn.Get();
++  std::string buf;
++  for (;;)
++  {
++    std::string head;
++    Request r;
++    if (!ReadHead(sock, buf, head))
++      break;
++    if (!ParseRequest(head, r))
++    {
++      (void)SendText(sock, Header(400, "Bad Request", nullptr, 0, false));
++      break;
++    }
++    if (r.method != "GET")
++    {
++      (void)SendText(sock, Header(405, "Method Not Allowed", nullptr, 0, false));
++      break;
++    }
++
++    if (r.path == "/" || r.path == "/index.html")
++    {
++      std::fprintf(stderr, "dolphin GBA web: page requested\n");
++      (void)SendText(sock, Header(200, "OK", "text/html; charset=utf-8", sizeof(PAGE) - 1, false));
++      (void)SendAll(sock, PAGE, sizeof(PAGE) - 1);
++      break;
++    }
++    if (r.path == "/k")
++    {
++      const u16 mask = static_cast<u16>(ParseUInt(QueryValue(r.query, "m"), 0, 0x3FF));
++      int dev = RequestedDevice(r);
++      if (dev < 0)
++      {
++        std::lock_guard lock(s.m);
++        dev = LowestActive(s);
++      }
++      if (dev >= 0)
++      {
++        const u16 before = HW::GBA::ExternalKeys(dev).exchange(mask);
++        if (before != mask && s.key_log_budget.fetch_sub(1) > 0)
++          std::fprintf(stderr, "dolphin GBA web: port %d keys %03x\n", dev + 1, mask);
++      }
++      s.last_key_ms = NowMs();
++      if (!SendText(sock, Header(204, "No Content", nullptr, 0, true)))
++        break;
++      continue;
++    }
++    if (r.path == "/state")
++    {
++      std::string json = "{\"ports\":[";
++      {
++        std::lock_guard lock(s.m);
++        bool first = true;
++        for (int i = 0; i < MAX_DEVICES; ++i)
++        {
++          if (!s.slots[i].active)
++            continue;
++          json += (first ? "" : ",") + std::to_string(i + 1);
++          first = false;
++        }
++      }
++      json += "]}";
++      (void)SendText(sock, Header(200, "OK", "application/json", json.size(), false));
++      (void)SendText(sock, json);
++      break;
++    }
++    if (r.path == "/frame")
++    {
++      if (!ServeFrame(sock, r))
++        break;
++      continue;
++    }
++    if (r.path == "/stream")
++    {
++      Stream(sock, r);
++      break;
++    }
++    (void)SendText(sock, Header(404, "Not Found", nullptr, 0, false));
++    break;
++  }
++  client->done = true;
++}
++
++void AcceptLoop()
++{
++  State& s = S();
++  long long last_report = NowMs();
++  unsigned reported_frames = 0;
++  while (!s.stop)
++  {
++    if (WaitReadable(s.listener, 100))
++    {
++      Fd conn(::accept(s.listener, nullptr, nullptr));
++      if (conn && conn.Get() < FD_SETSIZE && s.clients.size() < MAX_CLIENTS)
++      {
++        SetNonBlocking(conn.Get());
++        const int yes = 1;
++        (void)::setsockopt(conn.Get(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
++#ifdef SO_NOSIGPIPE
++        (void)::setsockopt(conn.Get(), SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
++#endif
++        s.clients.emplace_back();
++        Client& c = s.clients.back();
++        c.thread = std::thread(HandleClient, std::move(conn), &c);
++      }
++    }
++
++    for (auto it = s.clients.begin(); it != s.clients.end();)
++    {
++      if (it->done)
++      {
++        it->thread.join();
++        it = s.clients.erase(it);
++      }
++      else
++      {
++        ++it;
++      }
++    }
++
++    if (NowMs() - last_report >= 5000)
++    {
++      last_report = NowMs();
++      const unsigned frames = s.frames_served.load();
++      if (frames != reported_frames)
++      {
++        std::fprintf(stderr,
++                     "dolphin GBA web: %u frames served (%u in the last 5 s), %u idle polls, "
++                     "%llu KiB, slowest frame send %lld ms\n",
++                     frames, frames - reported_frames, s.idle_polls.load(),
++                     s.bytes_served.load() / 1024, s.max_send_ms.exchange(0));
++        reported_frames = frames;
++      }
++    }
++
++    // A held button nobody refreshes (a closed tab, a lost network) must not stay held.
++    if (NowMs() - s.last_key_ms > KEY_EXPIRY_MS)
++    {
++      for (int i = 0; i < MAX_DEVICES; ++i)
++        HW::GBA::ExternalKeys(i).store(0);
++    }
++  }
++}
++
++void StartServer(State& s)  // with s.lifecycle held
++{
++  if (s.accept_thread.joinable())
++    return;
++  s.stop = false;
++  Fd listener = OpenListener(PORT);
++  if (!listener)
++  {
++    std::fprintf(stderr, "dolphin GBA web: cannot listen on port %d\n", PORT);
++    return;
++  }
++  s.listener = listener.Get();
++  s.listener_owner = std::move(listener);
++  s.last_key_ms = NowMs();
++  s.accept_thread = std::thread(AcceptLoop);
++  std::fprintf(stderr, "dolphin GBA web: serving on port %d\n", PORT);
++}
++
++void StopServer(State& s)  // with s.lifecycle held
++{
++  if (!s.accept_thread.joinable())
++    return;
++  s.stop = true;
++  s.cv.notify_all();
++  s.accept_thread.join();
++  for (Client& c : s.clients)
++    c.thread.join();
++  s.clients.clear();
++  s.listener = -1;
++  s.listener_owner.Reset();
++  s.stop = false;
++  s.frames_served = 0;
++  s.idle_polls = 0;
++  s.bytes_served = 0;
++  s.max_send_ms = 0;
++  s.last_view_ms = 0;
++  {
++    std::lock_guard lock(s.m);
++    for (Slot& slot : s.slots)
++      slot = Slot{};
++  }
++  std::fprintf(stderr, "dolphin GBA web: stopped\n");
++}
++
++class WebHost final : public GBAHostInterface
++{
++public:
++  explicit WebHost(int device) : m_device(device)
++  {
++    State& s = S();
++    std::lock_guard life(s.lifecycle);
++    {
++      std::lock_guard lock(s.m);
++      s.slots[m_device].active = true;
++    }
++    ++s.refs;
++    StartServer(s);
++  }
++
++  ~WebHost() override
++  {
++    State& s = S();
++    std::lock_guard life(s.lifecycle);
++    HW::GBA::ExternalKeys(m_device).store(0);
++    {
++      std::lock_guard lock(s.m);
++      s.slots[m_device].active = false;
++    }
++    if (--s.refs <= 0)
++    {
++      s.refs = 0;
++      StopServer(s);
++    }
++  }
++
++  void GameChanged() override {}
++
++  // Called on the GBA's own thread, once per finished frame.
++  void FrameEnded(std::span<const u32> video) override
++  {
++    State& s = S();
++    if (video.empty() ||
++        (s.viewers.load(std::memory_order_relaxed) == 0 &&
++         NowMs() - s.last_view_ms.load(std::memory_order_relaxed) > VIEWER_GRACE_MS))
++      return;
++
++    u16 width = 240;
++    u16 height = static_cast<u16>(std::min<std::size_t>(video.size() / 240, 0xFFFF));
++    if (video.size() == 160 * 144)
++    {
++      width = 160;
++      height = 144;
++    }
++
++    // Converted outside the lock. mGBA's pixels are 0x00BBGGRR with each channel's top five bits
++    // significant.
++    m_scratch.resize(std::size_t{width} * height);
++    const std::size_t n = std::min(m_scratch.size(), video.size());
++    for (std::size_t i = 0; i < n; ++i)
++    {
++      const u32 v = video[i];
++      m_scratch[i] = static_cast<u16>(((v >> 3) & 0x1F) | (((v >> 11) & 0x1F) << 5) |
++                                      (((v >> 19) & 0x1F) << 10));
++    }
++
++    {
++      std::lock_guard lock(s.m);
++      Slot& slot = s.slots[m_device];
++      // A picture that has not changed is not a new frame: still screens (most of the Tingle
++      // Tuner's) then cost the browser nothing.
++      if (slot.width == width && slot.height == height && slot.pixels == m_scratch)
++        return;
++      slot.width = width;
++      slot.height = height;
++      slot.pixels.swap(m_scratch);
++      ++slot.seq;
++    }
++    s.cv.notify_all();
++  }
++
++private:
++  const int m_device;
++  std::vector<u16> m_scratch;  // the GBA thread's own
++};
++}  // namespace
++
++std::unique_ptr<GBAHostInterface> CreateHost(std::weak_ptr<HW::GBA::Core> core)
++{
++  const auto locked = core.lock();
++  if (!locked)
++    return nullptr;
++  const int device = locked->GetCoreInfo().device_number;
++  if (device < 0 || device >= MAX_DEVICES)  // the Game Boy Player's GBA has no screen to show
++    return nullptr;
++  return std::make_unique<WebHost>(device);
++}
++}  // namespace Libretro::GBAWeb
++
++#endif  // _WIN32
++
++#endif  // HAS_LIBMGBA
+diff --git a/Source/Core/DolphinLibretro/GBAWeb.h b/Source/Core/DolphinLibretro/GBAWeb.h
+new file mode 100644
+index 0000000..87720bf
+--- /dev/null
++++ b/Source/Core/DolphinLibretro/GBAWeb.h
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#ifdef HAS_LIBMGBA
++
++#include <memory>
++
++#include "Core/Host.h"
++
++namespace HW::GBA
++{
++class Core;
++}
++
++namespace Libretro::GBAWeb
++{
++// The host of one integrated GBA: its frames go to a page served on TCP port 6771 and the
++// page's buttons come back. The first host starts the server, the last one's destruction
++// stops it.
++std::unique_ptr<GBAHostInterface> CreateHost(std::weak_ptr<HW::GBA::Core> core);
++}  // namespace Libretro::GBAWeb
++
++#endif  // HAS_LIBMGBA
+diff --git a/Source/Core/DolphinLibretro/Host.cpp b/Source/Core/DolphinLibretro/Host.cpp
+index 56b35c4..b89533d 100644
+--- a/Source/Core/DolphinLibretro/Host.cpp
++++ b/Source/Core/DolphinLibretro/Host.cpp
+@@ -14,6 +14,9 @@
+ #include "Common/Logging/Log.h"
+ #include "Core/ConfigManager.h"
+ #include "Core/Host.h"
++#ifdef HAS_LIBMGBA
++#include "GBAWeb.h"
++#endif
+ 
+ std::vector<std::string> Host_GetPreferredLocales()
+ {
+@@ -26,9 +29,16 @@ void Host_JitCacheInvalidation() {}
+ void Host_JitProfileDataWiped() {}
+ bool Host_TASInputHasFocus() { return false; }
+ 
+-std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core>)
++// The integrated GBA's screen and buttons are a web page (GBAWeb.cpp); without libmgba there is
++// no GBA to host.
++std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core> core)
+ {
++#ifdef HAS_LIBMGBA
++    return Libretro::GBAWeb::CreateHost(std::move(core));
++#else
++    (void)core;
+     return nullptr;
++#endif
+ }
+ 
+ void Host_Message(HostMessageID id)
+diff --git a/Source/Core/DolphinLibretro/Input.cpp b/Source/Core/DolphinLibretro/Input.cpp
+index 5250054..4fac00c 100644
+--- a/Source/Core/DolphinLibretro/Input.cpp
++++ b/Source/Core/DolphinLibretro/Input.cpp
+@@ -59,6 +59,33 @@
+ #define RETRO_DEVICE_WIIMOTE_MP_CC ((10 << 8) | RETRO_DEVICE_JOYPAD)
+ #define RETRO_DEVICE_WIIMOTE_MP_CC_PRO ((11 << 8) | RETRO_DEVICE_JOYPAD)
+ 
++// GameCube only: a Game Boy Advance on the link cable, reached over TCP by an emulator
++// such as mGBA (Core/HW/SI/SI_DeviceGBA.cpp: Dolphin listens on ports 0xD6BA and 0xC10C
++// and the emulator connects to it). It takes no input, so its base class is NONE, as
++// RETRO_DEVICE_REAL_WIIMOTE's is.
++#define RETRO_DEVICE_GBA_TCP ((12 << 8) | RETRO_DEVICE_NONE)
++// The same, emulated inside the core (libmgba; built with USE_MGBA).
++#define RETRO_DEVICE_GBA_EMU ((13 << 8) | RETRO_DEVICE_NONE)
++
++// Makes a channel's configured SI device the real one, directly, as this port has always done for
++// controllers. A GBA device is the exception, whether it is being added or replaced: building or
++// tearing one down starts threads and schedules CoreTiming events, which must happen on the CPU
++// thread and, at content load, only once the SI is initialised (a saved remap applies before
++// that, and would crash). Dolphin's own UpdateDevices() does it from the configuration, once a
++// field on the CPU thread, and SI Init does it at boot.
++static void ApplySIDevice(int channel)
++{
++  auto& si = Core::System::GetInstance().GetSerialInterface();
++  const SerialInterface::SIDevices desired = Config::Get(Config::GetInfoForSIDevice(channel));
++  for (const SerialInterface::SIDevices type : {si.GetDeviceType(channel), desired})
++  {
++    if (type == SerialInterface::SIDEVICE_GC_GBA ||
++        type == SerialInterface::SIDEVICE_GC_GBA_EMULATED)
++      return;
++  }
++  si.ChangeDevice(desired, channel);
++}
++
+ /// The same remote with the dongle taken off, so everything downstream stays
+ /// written against the five original ids.
+ static inline unsigned wiimote_base_device(unsigned device)
+@@ -628,11 +655,20 @@ void InitStage2()
+   }
+   else
+   {
++    // A GameCube game's ports can also hold a GBA (TCP): the link cable.
++    static const struct retro_controller_description gc_desc[] = {
++        {"GameCube Controller", RETRO_DEVICE_JOYPAD},
++        {"GBA (TCP)", RETRO_DEVICE_GBA_TCP},
++#ifdef HAS_LIBMGBA
++        {"GBA (Integrated)", RETRO_DEVICE_GBA_EMU},
++#endif
++    };
++
+     static const struct retro_controller_info ports[] = {
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
+         {0},
+     };
+ 
+@@ -1144,8 +1180,31 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+   if (((!system.IsWii() || !altGCPorts) && port > 3) || port > 7)
+     return;
+ 
++  // The link cable is a GameCube feature; a saved choice does not carry over to a Wii game.
++  if ((device == RETRO_DEVICE_GBA_TCP || device == RETRO_DEVICE_GBA_EMU) && system.IsWii())
++    device = RETRO_DEVICE_JOYPAD;
++
+   Libretro::Input::input_types[port] = device;
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
++
++  if (device == RETRO_DEVICE_GBA_TCP)
++  {
++    // SI_DeviceGBA.cpp starts listening when the device is created, which Dolphin does from
++    // this setting (ApplySIDevice). Choosing a controller again replaces it the same way.
++    NOTICE_LOG_FMT(BOOT, "Port {}: GBA (TCP), Dolphin listens on 54970 (data) and 49420 (clock)",
++                   port + 1);
++    Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_GC_GBA);
++    return;
++  }
++
++#ifdef HAS_LIBMGBA
++  if (device == RETRO_DEVICE_GBA_EMU)
++  {
++    NOTICE_LOG_FMT(BOOT, "Port {}: GBA (Integrated)", port + 1);
++    Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port),
++                             SerialInterface::SIDEVICE_GC_GBA_EMULATED);
++    return;
++  }
++#endif
+ 
+   if (device == RETRO_DEVICE_NONE)
+   {
+@@ -1158,12 +1217,12 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+     if (!system.IsWii() || !altGCPorts)
+     {
+       Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
+-      si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
++      ApplySIDevice(port);
+     }
+     else if (port > 3)
+     {
+       Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port - 4), SerialInterface::SIDEVICE_NONE);
+-      si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port - 4)), port - 4);
++      ApplySIDevice(port - 4);
+     }
+   }
+   else if (!system.IsWii() || device == RETRO_DEVICE_GC_ON_WII || port > 3)
+@@ -1209,6 +1268,8 @@ void UpdateInputDescriptors()
+       break;
+ 
+     case RETRO_DEVICE_REAL_WIIMOTE:
++    case RETRO_DEVICE_GBA_TCP:
++    case RETRO_DEVICE_GBA_EMU:
+     case RETRO_DEVICE_NONE:
+       continue;
+ 
+@@ -1353,7 +1414,6 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+   std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
+   std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
+ #endif
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
+ 
+   if (device == RETRO_DEVICE_GC_ON_WII) // Disconnect Wii device if we're using GC controller as device type to avoid conflict
+     WiimoteCommon::OnSourceChanged(port, WiimoteSource::None);
+@@ -1362,7 +1422,7 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+ 
+   Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port > 3 ? port - 4 : port),
+     system.IsTriforce() ? SerialInterface::SIDEVICE_AM_BASEBOARD : SerialInterface::SIDEVICE_GC_CONTROLLER);
+-  si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port > 3 ? port - 4 : port)), port > 3 ? port - 4 : port);
++  ApplySIDevice(port > 3 ? port - 4 : port);
+ 
+   GCPad* gcPad = (GCPad*)Pad::GetConfig()->GetController(port > 3 ? port - 4 : port);
+   // load an empty inifile section, clears everything
+@@ -1439,7 +1499,6 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+   std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
+   std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
+ #endif
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
+ 
+   // Take the dongle off the id and remember it, so the branches below only see
+   // the remotes they were written for.
+@@ -1456,7 +1515,7 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+   if (!altGCPorts) // Disconnect GC controller to avoid conflict with Wii device
+   {
+     Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
+-    si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
++    ApplySIDevice(port);
+   }
+ 
+   WiimoteEmu::Wiimote* wm = load_saved_controller_config(port, device);
