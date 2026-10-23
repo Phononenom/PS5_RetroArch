@@ -1,0 +1,150 @@
+# Builds only the Dolphin libretro core for the PS5 title: no Vulkan driver, no
+# frontend, none of the other 32 cores. Put this file at
+# .github/workflows/build-dolphin-core.yml in your fork of mihawk-99/PS5_RetroArch,
+# after committing patches/dolphin/gba-link.patch and the tools/build-dolphin.sh
+# change. Run it from the Actions tab (Run workflow).
+#
+# Clang 20 is required: only its PS5 driver links with -m elf_x86_64_fbsd and the
+# PS5 page-size flags; Clang 18 and 19 produce a core whose ELF OS/ABI byte is wrong,
+# which tools/check-core.py and the console's core loader both reject.
+name: Build Dolphin core
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: 'Also build with ps5-port.patch alone (no GBA TCP patch)'
+        type: boolean
+        default: false
+      mgba:
+        description: 'Build libmgba in (USE_MGBA=ON): GBA (Integrated), shown in a browser on port 6771'
+        type: boolean
+        default: true
+  push:
+    paths:
+      - 'patches/dolphin/**'
+      - 'tools/build-dolphin.sh'
+      - 'tooling/dolphin/**'
+      - '.github/workflows/build-dolphin-core.yml'
+
+env:
+  CLANG_VERSION: '20'
+  # libmgba (the integrated GBA) is on for every run, including the ones a push starts, where
+  # the "mgba" input above does not exist; only a manual run can untick it.
+  USE_MGBA: ${{ (github.event_name != 'workflow_dispatch' || inputs.mgba) && '1' || '' }}
+
+jobs:
+  dolphin:
+    name: dolphin_libretro (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.baseline && '[{"variant":"gba-link","no_gba_link":""},{"variant":"baseline","no_gba_link":"1"}]' || '[{"variant":"gba-link","no_gba_link":""}]') }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
+      # Laid out as the README's sibling workspace: PS5_RetroArch next to PS5_PayloadSDK.
+      - uses: actions/checkout@v4
+        with:
+          path: PS5_RetroArch
+
+      - name: Read the pinned SDK revision
+        id: sdk
+        run: |
+          rev=$(sed -n 's/^sdk_revision=\([0-9a-f]\{40\}\).*/\1/p' \
+                  PS5_RetroArch/tools/setup-native-dependencies.sh)
+          [[ -n $rev ]] || { echo "no sdk_revision found" >&2; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      # ASSUMPTION: the README's "my payload SDK fork" is github.com/mihawk-99/PS5_PayloadSDK.
+      - uses: actions/checkout@v4
+        with:
+          repository: mihawk-99/PS5_PayloadSDK
+          ref: ${{ steps.sdk.outputs.rev }}
+          path: PS5_PayloadSDK
+
+      - name: Install build tools and Clang ${{ env.CLANG_VERSION }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            wget curl unzip make cmake ninja-build pkg-config ccache python3 git \
+            lsb-release software-properties-common gnupg ca-certificates
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$CLANG_VERSION"
+          sudo apt-get install -y "lld-$CLANG_VERSION" "llvm-$CLANG_VERSION"
+          # build-dolphin.sh uses /usr/bin/clang, and tools/check-core.py calls an
+          # unversioned llvm-objdump.
+          sudo update-alternatives --install /usr/bin/clang clang \
+            "/usr/bin/clang-$CLANG_VERSION" 100
+          sudo update-alternatives --set clang "/usr/bin/clang-$CLANG_VERSION"
+          sudo ln -sf "/usr/lib/llvm-$CLANG_VERSION/bin/llvm-objdump" /usr/local/bin/llvm-objdump
+          /usr/bin/clang --version | head -1
+          llvm-objdump --version | head -2
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-dolphin-${{ matrix.variant }}${{ env.USE_MGBA && '-mgba' || '' }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
+          restore-keys: ccache-dolphin-${{ matrix.variant }}${{ env.USE_MGBA && '-mgba' || '' }}-clang${{ env.CLANG_VERSION }}-
+
+      - name: Bootstrap the PS5 SDK
+        working-directory: PS5_RetroArch
+        env:
+          PS5_PAYLOAD_SDK_FORK: ${{ github.workspace }}/PS5_PayloadSDK
+        run: bash tools/setup-native-dependencies.sh
+
+      - name: Build the Dolphin core
+        working-directory: PS5_RetroArch
+        env:
+          PS5_PAYLOAD_SDK: ${{ github.workspace }}/PS5_RetroArch/.deps/native/ps5-payload-sdk
+          PS5_CLANG: /usr/bin/clang
+          DOLPHIN_NO_GBA_LINK: ${{ matrix.no_gba_link }}
+          DOLPHIN_USE_MGBA: ${{ env.USE_MGBA }}
+          JOBS: 4
+        run: bash tools/build-dolphin.sh
+
+      # The device names are compiled in only with libmgba (HAS_LIBMGBA), so their presence in the
+      # core shows what was really built, whatever the configure step quietly decided.
+      - name: Check what the core contains
+        working-directory: PS5_RetroArch
+        run: |
+          so=build/cores/stage/cores/dolphin_libretro.so
+          echo "GBA (TCP):        $(strings -a "$so" | grep -c 'GBA (TCP)')"
+          echo "GBA (Integrated): $(strings -a "$so" | grep -c 'GBA (Integrated)')"
+          echo "GBA web server:   $(strings -a "$so" | grep -c 'dolphin GBA web')"
+          if [[ -n "$USE_MGBA" ]] && ! strings -a "$so" | grep -q 'GBA (Integrated)'; then
+            echo "::error::libmgba was requested but this core has no integrated GBA (HAS_LIBMGBA was not defined). Look for mGBA in the CMake configure output."
+            exit 1
+          fi
+
+      # Saved even when the build fails, so a retry does not recompile Dolphin from zero.
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-dolphin-${{ matrix.variant }}${{ env.USE_MGBA && '-mgba' || '' }}-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
+
+      - name: Collect output
+        working-directory: PS5_RetroArch
+        run: |
+          mkdir -p out
+          cp build/cores/stage/cores/dolphin_libretro.so out/
+          cp build/cores/stage/info/dolphin_libretro.info out/
+          cp build/cores/dolphin/abi.json build/cores/dolphin/build.json out/
+          (cd out && sha256sum dolphin_libretro.so > dolphin_libretro.so.sha256)
+          head -c 8 out/dolphin_libretro.so | xxd
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dolphin_libretro-${{ matrix.variant }}${{ env.USE_MGBA && '-mgba' || '' }}
+          path: PS5_RetroArch/out/
+          if-no-files-found: error
