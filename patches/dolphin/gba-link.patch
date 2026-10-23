@@ -1162,10 +1162,10 @@ index 56b35c4..b89533d 100644
  
  void Host_Message(HostMessageID id)
 diff --git a/Source/Core/DolphinLibretro/Input.cpp b/Source/Core/DolphinLibretro/Input.cpp
-index 5250054..bcd2f70 100644
+index 5250054..4fac00c 100644
 --- a/Source/Core/DolphinLibretro/Input.cpp
 +++ b/Source/Core/DolphinLibretro/Input.cpp
-@@ -59,6 +59,14 @@
+@@ -59,6 +59,33 @@
  #define RETRO_DEVICE_WIIMOTE_MP_CC ((10 << 8) | RETRO_DEVICE_JOYPAD)
  #define RETRO_DEVICE_WIIMOTE_MP_CC_PRO ((11 << 8) | RETRO_DEVICE_JOYPAD)
  
@@ -1177,10 +1177,29 @@ index 5250054..bcd2f70 100644
 +// The same, emulated inside the core (libmgba; built with USE_MGBA).
 +#define RETRO_DEVICE_GBA_EMU ((13 << 8) | RETRO_DEVICE_NONE)
 +
++// Makes a channel's configured SI device the real one, directly, as this port has always done for
++// controllers. A GBA device is the exception, whether it is being added or replaced: building or
++// tearing one down starts threads and schedules CoreTiming events, which must happen on the CPU
++// thread and, at content load, only once the SI is initialised (a saved remap applies before
++// that, and would crash). Dolphin's own UpdateDevices() does it from the configuration, once a
++// field on the CPU thread, and SI Init does it at boot.
++static void ApplySIDevice(int channel)
++{
++  auto& si = Core::System::GetInstance().GetSerialInterface();
++  const SerialInterface::SIDevices desired = Config::Get(Config::GetInfoForSIDevice(channel));
++  for (const SerialInterface::SIDevices type : {si.GetDeviceType(channel), desired})
++  {
++    if (type == SerialInterface::SIDEVICE_GC_GBA ||
++        type == SerialInterface::SIDEVICE_GC_GBA_EMULATED)
++      return;
++  }
++  si.ChangeDevice(desired, channel);
++}
++
  /// The same remote with the dongle taken off, so everything downstream stays
  /// written against the five original ids.
  static inline unsigned wiimote_base_device(unsigned device)
-@@ -628,11 +636,20 @@ void InitStage2()
+@@ -628,11 +655,20 @@ void InitStage2()
    }
    else
    {
@@ -1205,7 +1224,7 @@ index 5250054..bcd2f70 100644
          {0},
      };
  
-@@ -1144,9 +1161,35 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+@@ -1144,8 +1180,31 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
    if (((!system.IsWii() || !altGCPorts) && port > 3) || port > 7)
      return;
  
@@ -1214,16 +1233,15 @@ index 5250054..bcd2f70 100644
 +    device = RETRO_DEVICE_JOYPAD;
 +
    Libretro::Input::input_types[port] = device;
-   auto& si = Core::System::GetInstance().GetSerialInterface();
- 
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
++
 +  if (device == RETRO_DEVICE_GBA_TCP)
 +  {
-+    // SI_DeviceGBA.cpp starts listening when the device is created. Choosing a controller
-+    // again replaces it (retro_set_controller_port_device_gc).
++    // SI_DeviceGBA.cpp starts listening when the device is created, which Dolphin does from
++    // this setting (ApplySIDevice). Choosing a controller again replaces it the same way.
 +    NOTICE_LOG_FMT(BOOT, "Port {}: GBA (TCP), Dolphin listens on 54970 (data) and 49420 (clock)",
 +                   port + 1);
 +    Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_GC_GBA);
-+    si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
 +    return;
 +  }
 +
@@ -1233,15 +1251,28 @@ index 5250054..bcd2f70 100644
 +    NOTICE_LOG_FMT(BOOT, "Port {}: GBA (Integrated)", port + 1);
 +    Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port),
 +                             SerialInterface::SIDEVICE_GC_GBA_EMULATED);
-+    si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
 +    return;
 +  }
 +#endif
-+
+ 
    if (device == RETRO_DEVICE_NONE)
    {
-     if (system.IsWii() && port < 4)
-@@ -1209,6 +1252,8 @@ void UpdateInputDescriptors()
+@@ -1158,12 +1217,12 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+     if (!system.IsWii() || !altGCPorts)
+     {
+       Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
+-      si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
++      ApplySIDevice(port);
+     }
+     else if (port > 3)
+     {
+       Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port - 4), SerialInterface::SIDEVICE_NONE);
+-      si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port - 4)), port - 4);
++      ApplySIDevice(port - 4);
+     }
+   }
+   else if (!system.IsWii() || device == RETRO_DEVICE_GC_ON_WII || port > 3)
+@@ -1209,6 +1268,8 @@ void UpdateInputDescriptors()
        break;
  
      case RETRO_DEVICE_REAL_WIIMOTE:
@@ -1250,3 +1281,37 @@ index 5250054..bcd2f70 100644
      case RETRO_DEVICE_NONE:
        continue;
  
+@@ -1353,7 +1414,6 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+   std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
+   std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
+ #endif
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
+ 
+   if (device == RETRO_DEVICE_GC_ON_WII) // Disconnect Wii device if we're using GC controller as device type to avoid conflict
+     WiimoteCommon::OnSourceChanged(port, WiimoteSource::None);
+@@ -1362,7 +1422,7 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+ 
+   Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port > 3 ? port - 4 : port),
+     system.IsTriforce() ? SerialInterface::SIDEVICE_AM_BASEBOARD : SerialInterface::SIDEVICE_GC_CONTROLLER);
+-  si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port > 3 ? port - 4 : port)), port > 3 ? port - 4 : port);
++  ApplySIDevice(port > 3 ? port - 4 : port);
+ 
+   GCPad* gcPad = (GCPad*)Pad::GetConfig()->GetController(port > 3 ? port - 4 : port);
+   // load an empty inifile section, clears everything
+@@ -1439,7 +1499,6 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+   std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
+   std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
+ #endif
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
+ 
+   // Take the dongle off the id and remember it, so the branches below only see
+   // the remotes they were written for.
+@@ -1456,7 +1515,7 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+   if (!altGCPorts) // Disconnect GC controller to avoid conflict with Wii device
+   {
+     Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
+-    si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
++    ApplySIDevice(port);
+   }
+ 
+   WiimoteEmu::Wiimote* wm = load_saved_controller_config(port, device);
