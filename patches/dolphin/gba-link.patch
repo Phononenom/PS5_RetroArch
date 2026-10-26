@@ -1312,7 +1312,7 @@ index 56b35c4..b89533d 100644
  
  void Host_Message(HostMessageID id)
 diff --git a/Source/Core/DolphinLibretro/Input.cpp b/Source/Core/DolphinLibretro/Input.cpp
-index 5250054..b1720f3 100644
+index 5250054..10349d5 100644
 --- a/Source/Core/DolphinLibretro/Input.cpp
 +++ b/Source/Core/DolphinLibretro/Input.cpp
 @@ -14,6 +14,7 @@
@@ -1323,7 +1323,16 @@ index 5250054..b1720f3 100644
  #include "Core/HW/EXI/EXI_Device.h"
  #include "Core/HW/EXI/EXI_DeviceMic.h"
  #include "Core/HW/GBAPad.h"
-@@ -59,6 +60,33 @@
+@@ -31,6 +32,8 @@
+ #include "Core/Host.h"
+ #include "Core/System.h"
+ #include "Core/WiiUtils.h"
++#include <atomic>
++
+ #include "DolphinLibretro/Input.h"
+ #include "DolphinLibretro/Common/Globals.h"
+ #include "DolphinLibretro/Common/Options.h"
+@@ -59,6 +62,33 @@
  #define RETRO_DEVICE_WIIMOTE_MP_CC ((10 << 8) | RETRO_DEVICE_JOYPAD)
  #define RETRO_DEVICE_WIIMOTE_MP_CC_PRO ((11 << 8) | RETRO_DEVICE_JOYPAD)
  
@@ -1357,7 +1366,173 @@ index 5250054..b1720f3 100644
  /// The same remote with the dongle taken off, so everything downstream stays
  /// written against the five original ids.
  static inline unsigned wiimote_base_device(unsigned device)
-@@ -141,6 +169,21 @@ static struct retro_input_descriptor descGC[] = {
+@@ -104,6 +134,165 @@ static retro_input_poll_t poll_cb = nullptr;
+ static retro_input_state_t input_cb = nullptr;
+ static struct retro_rumble_interface rumble{};
+ static unsigned input_types[8];
++
++// ---- GBA (Integrated): gamepad combos ------------------------------------------------------------
++// With a GBA on the link cable one controller can play both: hold the modifier (by default Select,
++// which the DualSense touchpad click is) and press the GBA's buttons. While it is held, the buttons a
++// combo uses never reach the GameCube pad, and the modifier itself never does, so nothing moves twice.
++static std::atomic<int> s_combo_port{-1};      // the port whose buttons are read; -1 when off
++static std::atomic<int> s_combo_modifier{-1};  // that port's modifier, a RetroPad id
++static std::atomic<bool> s_combo_held{false};  // the modifier is down
++
++static bool IsComboTarget(unsigned id)
++{
++  switch (id)
++  {
++  case RETRO_DEVICE_ID_JOYPAD_UP:
++  case RETRO_DEVICE_ID_JOYPAD_DOWN:
++  case RETRO_DEVICE_ID_JOYPAD_LEFT:
++  case RETRO_DEVICE_ID_JOYPAD_RIGHT:
++  case RETRO_DEVICE_ID_JOYPAD_B:
++  case RETRO_DEVICE_ID_JOYPAD_A:
++  case RETRO_DEVICE_ID_JOYPAD_L:
++  case RETRO_DEVICE_ID_JOYPAD_R:
++  case RETRO_DEVICE_ID_JOYPAD_L2:
++  case RETRO_DEVICE_ID_JOYPAD_START:
++    return true;
++  default:
++    return false;
++  }
++}
++
++// The port's buttons as the GameCube pad (and the rest of Dolphin) is shown them. Only the two
++// places that read the pad use this; the combos read input_cb itself.
++static int16_t DolphinInput(unsigned port, unsigned device, unsigned index, unsigned id)
++{
++  const int combo_port = s_combo_port.load(std::memory_order_relaxed);
++  if (combo_port >= 0 && port == static_cast<unsigned>(combo_port) &&
++      (device == RETRO_DEVICE_JOYPAD ||
++       (device == RETRO_DEVICE_ANALOG && index == RETRO_DEVICE_INDEX_ANALOG_BUTTON)))
++  {
++    if (static_cast<int>(id) == s_combo_modifier.load(std::memory_order_relaxed))
++      return 0;
++    if (s_combo_held.load(std::memory_order_relaxed) && IsComboTarget(id))
++      return 0;
++  }
++  return input_cb(port, device, index, id);
++}
++
++static int ComboModifierId(const std::string& name)
++{
++  if (name == "select")
++    return RETRO_DEVICE_ID_JOYPAD_SELECT;
++  if (name == "l3")
++    return RETRO_DEVICE_ID_JOYPAD_L3;
++  if (name == "r3")
++    return RETRO_DEVICE_ID_JOYPAD_R3;
++  if (name == "r2")
++    return RETRO_DEVICE_ID_JOYPAD_R2;
++  if (name == "x")
++    return RETRO_DEVICE_ID_JOYPAD_X;
++  if (name == "y")
++    return RETRO_DEVICE_ID_JOYPAD_Y;
++  return -1;
++}
++
++// Shows the "GBA (Integrated)" core options only while a port is set to it.
++static void RefreshGBAOptions()
++{
++  bool present = false;
++  for (int i = 0; i < 4; ++i)
++    present |= input_types[i] == RETRO_DEVICE_GBA_EMU;
++  Libretro::Options::SetGBAOptionsVisible(present);
++}
++
++// Every frame, after polling: the keys of each port set to GBA (Integrated) go to the GBA
++// (HW::GBA::PadKeys, mGBA's bit order: A, B, Select, Start, Right, Left, Up, Down, R, L), and the
++// combos' to the first of them. Also sets what DolphinInput hides.
++static void UpdateGBAInput()
++{
++  static constexpr struct
++  {
++    unsigned id;
++    u16 key;
++  } own_buttons[] = {
++      {RETRO_DEVICE_ID_JOYPAD_A, 1 << 0},      {RETRO_DEVICE_ID_JOYPAD_B, 1 << 1},
++      {RETRO_DEVICE_ID_JOYPAD_SELECT, 1 << 2}, {RETRO_DEVICE_ID_JOYPAD_START, 1 << 3},
++      {RETRO_DEVICE_ID_JOYPAD_RIGHT, 1 << 4},  {RETRO_DEVICE_ID_JOYPAD_LEFT, 1 << 5},
++      {RETRO_DEVICE_ID_JOYPAD_UP, 1 << 6},     {RETRO_DEVICE_ID_JOYPAD_DOWN, 1 << 7},
++      {RETRO_DEVICE_ID_JOYPAD_R, 1 << 8},      {RETRO_DEVICE_ID_JOYPAD_L, 1 << 9},
++  };
++  // With the modifier held: the gamepad's D-pad, B, A, L1, R1, L2 and Options (Start) are the
++  // GBA's D-pad, B, A, L, R, Select and Start.
++  static constexpr struct
++  {
++    unsigned id;
++    u16 key;
++  } combo_buttons[] = {
++      {RETRO_DEVICE_ID_JOYPAD_A, 1 << 0},     {RETRO_DEVICE_ID_JOYPAD_B, 1 << 1},
++      {RETRO_DEVICE_ID_JOYPAD_L2, 1 << 2},    {RETRO_DEVICE_ID_JOYPAD_START, 1 << 3},
++      {RETRO_DEVICE_ID_JOYPAD_RIGHT, 1 << 4}, {RETRO_DEVICE_ID_JOYPAD_LEFT, 1 << 5},
++      {RETRO_DEVICE_ID_JOYPAD_UP, 1 << 6},    {RETRO_DEVICE_ID_JOYPAD_DOWN, 1 << 7},
++      {RETRO_DEVICE_ID_JOYPAD_R, 1 << 8},     {RETRO_DEVICE_ID_JOYPAD_L, 1 << 9},
++  };
++
++  RefreshGBAOptions();
++
++  int gba_port = -1;
++  for (int i = 0; i < 4 && gba_port < 0; ++i)
++  {
++    if (input_types[i] == RETRO_DEVICE_GBA_EMU)
++      gba_port = i;
++  }
++
++  u16 combo_keys = 0;
++  int combo_port = -1;
++  int modifier = -1;
++  bool held = false;
++  if (gba_port >= 0 && input_cb &&
++      Libretro::Options::GetCached<bool>(Libretro::Options::gba::COMBOS, true))
++  {
++    modifier = ComboModifierId(
++        Libretro::Options::GetCached<std::string>(Libretro::Options::gba::COMBO_MODIFIER, "select"));
++    const int port = Libretro::Options::GetCached<int>(Libretro::Options::gba::COMBO_PORT, 1) - 1;
++    if (modifier >= 0 && port >= 0 && port < 4)
++    {
++      combo_port = port;
++      held = input_cb(port, RETRO_DEVICE_JOYPAD, 0, modifier) != 0;
++      if (held)
++      {
++        for (const auto& button : combo_buttons)
++        {
++          if (static_cast<int>(button.id) != modifier &&
++              input_cb(port, RETRO_DEVICE_JOYPAD, 0, button.id))
++            combo_keys |= button.key;
++        }
++      }
++    }
++  }
++  s_combo_modifier.store(modifier, std::memory_order_relaxed);
++  s_combo_held.store(held, std::memory_order_relaxed);
++  s_combo_port.store(combo_port, std::memory_order_relaxed);
++
++  for (int i = 0; i < 4; ++i)
++  {
++    u16 keys = 0;
++    if (input_cb && input_types[i] == RETRO_DEVICE_GBA_EMU)
++    {
++      for (const auto& button : own_buttons)
++      {
++        // When the combos read this very port, the modifier is not also the GBA's own button.
++        if (i == combo_port && static_cast<int>(button.id) == modifier)
++          continue;
++        if (input_cb(i, RETRO_DEVICE_JOYPAD, 0, button.id))
++          keys |= button.key;
++      }
++      if (i == gba_port)
++        keys |= combo_keys;
++    }
++    HW::GBA::PadKeys(i).store(keys, std::memory_order_relaxed);
++  }
++}
+ static bool g_init_wiimotes = false;
+ static bool s_sensor_init_pending = false;
+ static bool sensor_enabled[NUM_CONTROLLERS_FOR_SENSORS][SENSOR_COUNT] = {};
+@@ -141,6 +330,21 @@ static struct retro_input_descriptor descGC[] = {
      {0},
  };
  
@@ -1379,7 +1554,25 @@ index 5250054..b1720f3 100644
  static struct retro_input_descriptor descWiimoteCC[] = {
      {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT, "Left"},
      {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP, "Up"},
-@@ -628,11 +671,19 @@ void InitStage2()
+@@ -305,7 +509,7 @@ private:
+     {
+     }
+     std::string GetName() const override { return m_name; }
+-    ControlState GetState() const override { return input_cb(m_port, m_device, m_index, m_id); }
++    ControlState GetState() const override { return DolphinInput(m_port, m_device, m_index, m_id); }
+ 
+   private:
+     const unsigned m_port;
+@@ -325,7 +529,7 @@ private:
+     std::string GetName() const override { return m_name; }
+     ControlState GetState() const override
+     {
+-      return std::max(0.0, input_cb(m_port, m_device, m_index, m_id) / m_range);
++      return std::max(0.0, DolphinInput(m_port, m_device, m_index, m_id) / m_range);
+     }
+ 
+   private:
+@@ -628,11 +832,19 @@ void InitStage2()
    }
    else
    {
@@ -1403,43 +1596,16 @@ index 5250054..b1720f3 100644
          {0},
      };
  
-@@ -852,6 +903,35 @@ void Update()
+@@ -852,6 +1064,8 @@ void Update()
      UpdateGyro(i);
    }
  
-+  // A port set to GBA (Integrated): its buttons are the GBA's keys, in mGBA's bit order (A, B,
-+  // Select, Start, Right, Left, Up, Down, R, L). SI_DeviceGBAEmu ORs them in with the page's.
-+  {
-+    static constexpr struct
-+    {
-+      unsigned id;
-+      u16 key;
-+    } gba_buttons[] = {
-+        {RETRO_DEVICE_ID_JOYPAD_A, 1 << 0},      {RETRO_DEVICE_ID_JOYPAD_B, 1 << 1},
-+        {RETRO_DEVICE_ID_JOYPAD_SELECT, 1 << 2}, {RETRO_DEVICE_ID_JOYPAD_START, 1 << 3},
-+        {RETRO_DEVICE_ID_JOYPAD_RIGHT, 1 << 4},  {RETRO_DEVICE_ID_JOYPAD_LEFT, 1 << 5},
-+        {RETRO_DEVICE_ID_JOYPAD_UP, 1 << 6},     {RETRO_DEVICE_ID_JOYPAD_DOWN, 1 << 7},
-+        {RETRO_DEVICE_ID_JOYPAD_R, 1 << 8},      {RETRO_DEVICE_ID_JOYPAD_L, 1 << 9},
-+    };
-+    for (int i = 0; i < 4; ++i)
-+    {
-+      u16 keys = 0;
-+      if (input_cb && input_types[i] == RETRO_DEVICE_GBA_EMU)
-+      {
-+        for (const auto& button : gba_buttons)
-+        {
-+          if (input_cb(i, RETRO_DEVICE_JOYPAD, 0, button.id))
-+            keys |= button.key;
-+        }
-+      }
-+      HW::GBA::PadKeys(i).store(keys, std::memory_order_relaxed);
-+    }
-+  }
++  UpdateGBAInput();
 +
    auto& system = Core::System::GetInstance();
    bool gcMicEnable = Libretro::Options::GetCached<bool>(Libretro::Options::sysconf_gc::ENABLE_GAMECUBE_MIC);
  
-@@ -1144,8 +1224,28 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+@@ -1144,8 +1358,29 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
    if (((!system.IsWii() || !altGCPorts) && port > 3) || port > 7)
      return;
  
@@ -1456,6 +1622,7 @@ index 5250054..b1720f3 100644
 +
    Libretro::Input::input_types[port] = device;
 -  auto& si = Core::System::GetInstance().GetSerialInterface();
++  Libretro::Input::RefreshGBAOptions();
 +
 +#ifdef HAS_LIBMGBA
 +  if (device == RETRO_DEVICE_GBA_EMU)
@@ -1469,7 +1636,7 @@ index 5250054..b1720f3 100644
  
    if (device == RETRO_DEVICE_NONE)
    {
-@@ -1158,12 +1258,12 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+@@ -1158,12 +1393,12 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
      if (!system.IsWii() || !altGCPorts)
      {
        Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
@@ -1484,7 +1651,7 @@ index 5250054..b1720f3 100644
      }
    }
    else if (!system.IsWii() || device == RETRO_DEVICE_GC_ON_WII || port > 3)
-@@ -1212,6 +1312,10 @@ void UpdateInputDescriptors()
+@@ -1212,6 +1447,10 @@ void UpdateInputDescriptors()
      case RETRO_DEVICE_NONE:
        continue;
  
@@ -1495,7 +1662,7 @@ index 5250054..b1720f3 100644
      case RETRO_DEVICE_GC_ON_WII:
        desc = Libretro::Input::descGC;
        break;
-@@ -1353,7 +1457,6 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+@@ -1353,7 +1592,6 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
    std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
    std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
  #endif
@@ -1503,7 +1670,7 @@ index 5250054..b1720f3 100644
  
    if (device == RETRO_DEVICE_GC_ON_WII) // Disconnect Wii device if we're using GC controller as device type to avoid conflict
      WiimoteCommon::OnSourceChanged(port, WiimoteSource::None);
-@@ -1362,7 +1465,7 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+@@ -1362,7 +1600,7 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
  
    Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port > 3 ? port - 4 : port),
      system.IsTriforce() ? SerialInterface::SIDEVICE_AM_BASEBOARD : SerialInterface::SIDEVICE_GC_CONTROLLER);
@@ -1512,7 +1679,7 @@ index 5250054..b1720f3 100644
  
    GCPad* gcPad = (GCPad*)Pad::GetConfig()->GetController(port > 3 ? port - 4 : port);
    // load an empty inifile section, clears everything
-@@ -1439,7 +1542,6 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+@@ -1439,7 +1677,6 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
    std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
    std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
  #endif
@@ -1520,7 +1687,7 @@ index 5250054..b1720f3 100644
  
    // Take the dongle off the id and remember it, so the branches below only see
    // the remotes they were written for.
-@@ -1456,7 +1558,7 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+@@ -1456,7 +1693,7 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
    if (!altGCPorts) // Disconnect GC controller to avoid conflict with Wii device
    {
      Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
@@ -1529,3 +1696,150 @@ index 5250054..b1720f3 100644
    }
  
    WiimoteEmu::Wiimote* wm = load_saved_controller_config(port, device);
+diff --git a/Source/Core/DolphinLibretro/Common/Options.cpp b/Source/Core/DolphinLibretro/Common/Options.cpp
+index 7d27a1e..2521d06 100644
+--- a/Source/Core/DolphinLibretro/Common/Options.cpp
++++ b/Source/Core/DolphinLibretro/Common/Options.cpp
+@@ -16,6 +16,7 @@ static constexpr const char* CATEGORY_AUDIO = "audio";
+ static constexpr const char* CATEGORY_INTERFACE = "interface";
+ static constexpr const char* CATEGORY_GC = "sysconf_gc";
+ static constexpr const char* CATEGORY_SYSCONF = "sysconf";
++static constexpr const char* CATEGORY_GBA = "gba";
+ static constexpr const char* CATEGORY_GFX_HARDWARE = "graphics_hardware";
+ static constexpr const char* CATEGORY_GFX_SETTINGS = "graphics_settings";
+ static constexpr const char* CATEGORY_GFX_ENHANCEMENTS = "graphics_enhancements";
+@@ -46,6 +47,11 @@ static const struct retro_core_option_v2_category option_cats[] = {
+     "System Configuration - Gamecube",
+     "Configure Gamecube system settings."
+   },
++  {
++    CATEGORY_GBA,
++    "GBA (Integrated)",
++    "Configure the Game Boy Advance on the link cable. Shown while a controller port is set to GBA (Integrated)."
++  },
+   {
+     CATEGORY_SYSCONF,
+     "System Configuration - Wii",
+@@ -1860,14 +1866,92 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     "enabled"
+   },
+ 
++  // ========== GBA (Integrated) ==========
++  {
++    Libretro::Options::gba::COMBOS,
++    "GBA (Integrated) > Gamepad Combos",
++    "Gamepad Combos",
++    "Play the GBA with the controller that plays the GameCube game: hold the combo modifier and "
++    "press the GBA's buttons (D-pad, B, A, L1 as L, R1 as R, L2 as Select, Start). While it is held "
++    "those buttons do not reach the GameCube pad. Turn off to leave the GBA to its own port and the "
++    "browser page.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "disabled", nullptr },
++      { "enabled",  nullptr },
++      { nullptr, nullptr }
++    },
++    "enabled"
++  },
++  {
++    Libretro::Options::gba::COMBO_PORT,
++    "GBA (Integrated) > Combo Controller",
++    "Combo Controller",
++    "Which controller port's buttons are read for the combos.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "1", "Port 1" },
++      { "2", "Port 2" },
++      { "3", "Port 3" },
++      { "4", "Port 4" },
++      { nullptr, nullptr }
++    },
++    "1"
++  },
++  {
++    Libretro::Options::gba::COMBO_MODIFIER,
++    "GBA (Integrated) > Combo Modifier",
++    "Combo Modifier",
++    "The button held to turn the controller into the GBA's. Select is the DualSense touchpad click. "
++    "It never reaches the GameCube pad while Gamepad Combos is on.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "select", "Select (DualSense touchpad)" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "r2",     "R2" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { nullptr, nullptr }
++    },
++    "select"
++  },
++
+   { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{0}}, nullptr }
+ };
+ 
++static int s_gba_options_visible = -1;
++
++void SetGBAOptionsVisible(bool visible)
++{
++  if (!environ_cb || s_gba_options_visible == (visible ? 1 : 0))
++    return;
++  s_gba_options_visible = visible ? 1 : 0;
++
++  const char* const keys[] = {
++    Libretro::Options::gba::COMBOS,
++    Libretro::Options::gba::COMBO_PORT,
++    Libretro::Options::gba::COMBO_MODIFIER,
++  };
++  for (const char* key : keys)
++  {
++    retro_core_option_display display{key, visible};
++    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &display);
++  }
++}
++
+ void Init()
+ {
+   SetVariables();
+   RegisterCache();
+   CheckForUpdatedVariables();
++
++  // Hidden until a port is set to GBA (Integrated); the input code shows them (Input.cpp).
++  s_gba_options_visible = -1;
++  SetGBAOptionsVisible(false);
+ }
+ 
+ void SetVariables()
+diff --git a/Source/Core/DolphinLibretro/Common/Options.h b/Source/Core/DolphinLibretro/Common/Options.h
+index 0601c80..da7dab7 100644
+--- a/Source/Core/DolphinLibretro/Common/Options.h
++++ b/Source/Core/DolphinLibretro/Common/Options.h
+@@ -41,6 +41,9 @@ void SetVariables();
+ void RegisterCache();
+ void CheckForUpdatedVariables();
+ 
++// Shows or hides the "GBA (Integrated)" options (they matter only while a port is set to it).
++void SetGBAOptionsVisible(bool visible);
++
+ template <typename T>
+ T GetCached(const char* key, T def = T{});
+ bool IsUpdated(const char* key);
+@@ -194,6 +197,15 @@ namespace sysconf_gc {
+   constexpr const char HOTKEY_ACTIVATE_MICROPHONE[] = "dolphin_hotkey_activate_microphone";
+ }
+ 
++// ======================================================
++// GBA (Integrated)
++// ======================================================
++namespace gba {
++  constexpr const char COMBOS[] = "dolphin_gba_combos";
++  constexpr const char COMBO_PORT[] = "dolphin_gba_combo_port";
++  constexpr const char COMBO_MODIFIER[] = "dolphin_gba_combo_modifier";
++}
++
+ // ======================================================
+ // System Configuration (SYSCONF) - Wii
+ // ======================================================
