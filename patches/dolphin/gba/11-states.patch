@@ -1,0 +1,531 @@
+diff --git a/Source/Core/Core/HW/GBAExternalKeys.h b/Source/Core/Core/HW/GBAExternalKeys.h
+index a73fd6e..fd708ac 100644
+--- a/Source/Core/Core/HW/GBAExternalKeys.h
++++ b/Source/Core/Core/HW/GBAExternalKeys.h
+@@ -51,6 +51,14 @@ inline std::atomic<bool>& LinkPulled(int device_number)
+   return pulled[device_number & 3];
+ }
+ 
++// RetroAchievements hardcore is on (the libretro core asks the frontend every frame): the GBAs
++// load no state and import no save, as RetroArch loads no state of its own (SI_DeviceGBAEmu.cpp).
++inline std::atomic<bool>& HardcoreActive()
++{
++  static std::atomic<bool> on{false};
++  return on;
++}
++
+ // A frontend maps the GBAs' buttons itself (it has called dolphin_gba_set_keys): a port holding a
+ // GBA no longer reads its own libretro controller as the GBA's buttons (Input.cpp).
+ inline std::atomic<bool>& FrontendOwnsInput()
+diff --git a/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp b/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp
+index a3618a0..ae06a51 100644
+--- a/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp
++++ b/Source/Core/Core/HW/SI/SI_DeviceGBAEmu.cpp
+@@ -23,6 +23,7 @@
+ #include "Core/Host.h"
+ #include "Core/NetPlayProto.h"
+ #include "Core/System.h"
++#include "VideoCommon/OnScreenDisplay.h"
+ 
+ namespace SerialInterface
+ {
+@@ -168,6 +169,15 @@ DataResponse CSIDevice_GBAEmu::GetData(u32& hi, u32& low)
+       requests.queue.pop_front();
+     }
+     const std::string& path = request.second;
++    if ((request.first == HW::GBA::Request::ImportState ||
++         request.first == HW::GBA::Request::ImportSave) &&
++        HW::GBA::HardcoreActive().load(std::memory_order_relaxed))
++    {
++      WARN_LOG_FMT(SERIALINTERFACE, "GBA {}: hardcore is on, not loading {}", m_device_number + 1,
++                   path);
++      OSD::AddMessage("Hardcore mode: the GBA can't load states or saves", OSD::Duration::NORMAL);
++      continue;
++    }
+     switch (request.first)
+     {
+     case HW::GBA::Request::Connect:
+diff --git a/Source/Core/DolphinLibretro/Common/Options.cpp b/Source/Core/DolphinLibretro/Common/Options.cpp
+index 8bcb71f..c1d19a9 100644
+--- a/Source/Core/DolphinLibretro/Common/Options.cpp
++++ b/Source/Core/DolphinLibretro/Common/Options.cpp
+@@ -2353,6 +2353,64 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p1_qsave",
++    "GBA (Integrated) > Player 1 GBA Quick Save",
++    "Player 1 GBA Quick Save",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Save for player 1.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
++  {
++    "dolphin_gba_p1_qload",
++    "GBA (Integrated) > Player 1 GBA Quick Load",
++    "Player 1 GBA Quick Load",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Load for player 1.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p1_show",
+     "GBA (Integrated) > Player 1 GBA Show Screen",
+@@ -2846,6 +2904,64 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p2_qsave",
++    "GBA (Integrated) > Player 2 GBA Quick Save",
++    "Player 2 GBA Quick Save",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Save for player 2.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
++  {
++    "dolphin_gba_p2_qload",
++    "GBA (Integrated) > Player 2 GBA Quick Load",
++    "Player 2 GBA Quick Load",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Load for player 2.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p2_show",
+     "GBA (Integrated) > Player 2 GBA Show Screen",
+@@ -3339,6 +3455,64 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p3_qsave",
++    "GBA (Integrated) > Player 3 GBA Quick Save",
++    "Player 3 GBA Quick Save",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Save for player 3.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
++  {
++    "dolphin_gba_p3_qload",
++    "GBA (Integrated) > Player 3 GBA Quick Load",
++    "Player 3 GBA Quick Load",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Load for player 3.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p3_show",
+     "GBA (Integrated) > Player 3 GBA Show Screen",
+@@ -3832,6 +4006,64 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p4_qsave",
++    "GBA (Integrated) > Player 4 GBA Quick Save",
++    "Player 4 GBA Quick Save",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Save for player 4.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
++  {
++    "dolphin_gba_p4_qload",
++    "GBA (Integrated) > Player 4 GBA Quick Load",
++    "Player 4 GBA Quick Load",
++    "The RetroPad button (after RetroArch's own remapping) that is the GBA's Quick Load for player 4.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p4_show",
+     "GBA (Integrated) > Player 4 GBA Show Screen",
+diff --git a/Source/Core/DolphinLibretro/Common/Options.h b/Source/Core/DolphinLibretro/Common/Options.h
+index ce57e9d..a1dae82 100644
+--- a/Source/Core/DolphinLibretro/Common/Options.h
++++ b/Source/Core/DolphinLibretro/Common/Options.h
+@@ -213,8 +213,8 @@ namespace gba {
+   constexpr const char* STICK[4] = {"dolphin_gba_p1_stick", "dolphin_gba_p2_stick",
+                                     "dolphin_gba_p3_stick", "dolphin_gba_p4_stick"};
+   // Each player's GBA buttons, in GBAInput's order (Input.cpp): the GBA's ten keys in mGBA's bit
+-  // order (A, B, Select, Start, Right, Left, Up, Down, R, L), then Reset, Link Cable, Show Screen, Move Screen, Adjust Opacity.
+-  constexpr int BUTTON_COUNT = 15;
++  // order (A, B, Select, Start, Right, Left, Up, Down, R, L), then Reset, Link Cable, Quick Save, Quick Load, Show Screen, Move Screen, Adjust Opacity.
++  constexpr int BUTTON_COUNT = 17;
+ #define DOLPHIN_GBA_BUTTONS(p) \
+   {\
+    "dolphin_gba_" p "_a", \
+@@ -229,6 +229,8 @@ namespace gba {
+    "dolphin_gba_" p "_l", \
+    "dolphin_gba_" p "_reset", \
+    "dolphin_gba_" p "_link", \
++   "dolphin_gba_" p "_qsave", \
++   "dolphin_gba_" p "_qload", \
+    "dolphin_gba_" p "_show", \
+    "dolphin_gba_" p "_move", \
+    "dolphin_gba_" p "_opacity"}
+diff --git a/Source/Core/DolphinLibretro/GBALink.cpp b/Source/Core/DolphinLibretro/GBALink.cpp
+index cc8e694..ba25890 100644
+--- a/Source/Core/DolphinLibretro/GBALink.cpp
++++ b/Source/Core/DolphinLibretro/GBALink.cpp
+@@ -28,15 +28,25 @@
+ 
+ #ifdef HAS_LIBMGBA
+ 
++namespace Libretro
++{
++extern retro_environment_t environ_cb;
++}
++
+ namespace Libretro::GBALink
+ {
+ namespace
+ {
++// Port-private environment calls of this port's RetroArch (patches/series, 0138).
++constexpr unsigned ENV_GET_HARDCORE = 0x20000 | 1;
++constexpr unsigned ENV_GET_SAVESTATE_DIRECTORY = 0x20000 | 2;
++
+ // A core option holds at most RETRO_NUM_CORE_OPTION_VALUES_MAX values, one of them the end mark.
+ constexpr size_t MAX_ROMS = RETRO_NUM_CORE_OPTION_VALUES_MAX - 3;
+ 
+ std::vector<std::string> s_subsystem_roms;
+ std::string s_rom_root;     // <Sys>/GBA
++std::string s_states_dir;
+ // The choices' strings (the options point into them); filled once, before registration.
+ std::array<std::vector<std::string>, 4> s_choices;
+ // What each port was last given (game, and whether its save sits beside it).
+@@ -118,7 +128,14 @@ void PrepareOptions(const std::string& sys_dir, const char* save_dir)
+     def->values[n] = {nullptr, nullptr};
+   }
+ 
+-  INFO_LOG_FMT(SERIALINTERFACE, "GBA: games in {}", s_rom_root);
++  const char* states = nullptr;
++  if (environ_cb && environ_cb(ENV_GET_SAVESTATE_DIRECTORY, &states) && states && *states)
++    s_states_dir = std::string(states) + DIR_SEP "GBA";
++  else if (save_dir && *save_dir)
++    s_states_dir = std::string(save_dir) + DIR_SEP "User" DIR_SEP "GBA" DIR_SEP "States";
++  else
++    s_states_dir = sys_dir + DIR_SEP "GBA" DIR_SEP "States";
++  INFO_LOG_FMT(SERIALINTERFACE, "GBA: games in {}, states in {}", s_rom_root, s_states_dir);
+ }
+ 
+ void ApplySaveLocation()
+@@ -170,6 +187,17 @@ void ApplyRoms(const unsigned* input_types, unsigned gba_device)
+   }
+ }
+ 
++void PollHardcore()
++{
++  bool on = false;
++  if (!environ_cb || !environ_cb(ENV_GET_HARDCORE, &on))
++    on = false;
++  const bool was = HW::GBA::HardcoreActive().exchange(on, std::memory_order_relaxed);
++  if (on != was)
++    NOTICE_LOG_FMT(SERIALINTERFACE, "GBA: hardcore {}: state load and save import are {}",
++                   on ? "on" : "off", on ? "off" : "on");
++}
++
+ void ToggleLinkCable(int port)
+ {
+   const bool out = !HW::GBA::LinkPulled(port).load();
+@@ -183,6 +211,65 @@ void ToggleLinkCable(int port)
+                               std::string{});
+ }
+ 
++void QuickState(int port, bool save)
++{
++  const std::string rom = Config::Get(Config::MAIN_GBA_ROM_PATHS[port & 3]);
++  if (rom.empty())
++  {
++    OSD::AddMessage(fmt::format("GBA {}: no game, no state", port + 1), OSD::Duration::SHORT);
++    return;
++  }
++  if (!save && HW::GBA::HardcoreActive().load(std::memory_order_relaxed))
++  {
++    WARN_LOG_FMT(SERIALINTERFACE, "GBA {}: hardcore is on, no quick load", port + 1);
++    OSD::AddMessage("Hardcore mode: the GBA can't load states or saves", OSD::Duration::NORMAL);
++    return;
++  }
++  File::CreateFullPath(s_states_dir + DIR_SEP);
++  const std::string stem = std::filesystem::path(rom).stem().string();
++  // The nine slots: the first empty, else the oldest (save); the newest (load).
++  int pick = -1;
++  std::filesystem::file_time_type pick_time{};
++  for (int slot = 1; slot <= 9; ++slot)
++  {
++    const std::string path = fmt::format("{}/{}-p{}.ss{}", s_states_dir, stem, port + 1, slot);
++    std::error_code ec;
++    const auto time = std::filesystem::last_write_time(path, ec);
++    if (ec)
++    {
++      if (save)
++      {
++        pick = slot;
++        break;
++      }
++      continue;
++    }
++    if (pick < 0 || (save ? time < pick_time : time > pick_time))
++    {
++      pick = slot;
++      pick_time = time;
++    }
++  }
++  if (pick < 0)
++  {
++    OSD::AddMessage(fmt::format("GBA {}: no state to load", port + 1), OSD::Duration::SHORT);
++    return;
++  }
++  const std::string path = fmt::format("{}/{}-p{}.ss{}", s_states_dir, stem, port + 1, pick);
++  INFO_LOG_FMT(SERIALINTERFACE, "GBA {}: quick {} slot {} ({})", port + 1, save ? "save" : "load",
++               pick, path);
++  OSD::AddMessage(fmt::format("GBA {}: {} slot {}", port + 1, save ? "saved to" : "loaded", pick),
++                  OSD::Duration::SHORT);
++  auto& requests = HW::GBA::RequestsFor(port);
++  std::lock_guard lock(requests.lock);
++  requests.queue.emplace_back(save ? HW::GBA::Request::ExportState : HW::GBA::Request::ImportState,
++                              path);
++}
++
++const std::string& StatesDir()
++{
++  return s_states_dir;
++}
+ }  // namespace Libretro::GBALink
+ 
+ #endif  // HAS_LIBMGBA
+diff --git a/Source/Core/DolphinLibretro/GBALink.h b/Source/Core/DolphinLibretro/GBALink.h
+index 2da8639..b6117e3 100644
+--- a/Source/Core/DolphinLibretro/GBALink.h
++++ b/Source/Core/DolphinLibretro/GBALink.h
+@@ -16,7 +16,8 @@ inline constexpr unsigned SUBSYSTEM_LAST = 0x105;   // four
+ void SetSubsystemRoms(std::vector<std::string> roms);
+ 
+ // retro_load_game, before the core options are registered: lists the ROMs in <Sys>/GBA and
+-// <Sys>/GBA/port1..4 as the choices of each port's "Game" option.
++// <Sys>/GBA/port1..4 as the choices of each port's "Game" option, and asks RetroArch (patch 0138)
++// for its savestate folder.
+ void PrepareOptions(const std::string& sys_dir, const char* save_dir);
+ 
+ // retro_load_game, after Dolphin's config is up: Dolphin's "Save in the Same Directory as the ROM".
+@@ -28,6 +29,19 @@ void ApplySaveLocation();
+ // changed).
+ void ApplyRoms(const unsigned* input_types, unsigned gba_device);
+ 
++// Every frame, on the frontend's thread: asks RetroArch whether hardcore is on (patch 0138),
++// for the CPU thread (HW::GBA::HardcoreActive).
++void PollHardcore();
++
+ // A GBA's Link Cable button: pulls the cable out, or plugs it back in (Dolphin's Disconnect).
+ void ToggleLinkCable(int port);
++
++// Quick Save: the game's state into the first empty of its nine slots, else the oldest. Quick
++// Load: the newest. Slots are per game and port: <StatesDir>/<rom name>-p<port>.ss1..9. Load is
++// refused in hardcore.
++void QuickState(int port, bool save);
++
++// Where the GBAs' save states go: RetroArch's savestate folder (patch 0138) + "/GBA", else the
++// save folder's User/GBA/States.
++const std::string& StatesDir();
+ }  // namespace Libretro::GBALink
+diff --git a/Source/Core/DolphinLibretro/Input.cpp b/Source/Core/DolphinLibretro/Input.cpp
+index 95762e5..2e0e643 100644
+--- a/Source/Core/DolphinLibretro/Input.cpp
++++ b/Source/Core/DolphinLibretro/Input.cpp
+@@ -144,7 +144,7 @@ enum GBAInput
+ {
+   GBA_A, GBA_B, GBA_SELECT, GBA_START, GBA_RIGHT, GBA_LEFT, GBA_UP, GBA_DOWN, GBA_R, GBA_L,
+   GBA_KEY_COUNT,  // the GBA's own keys, mGBA's bit order
+-  GBA_RESET = GBA_KEY_COUNT, GBA_LINK,
++  GBA_RESET = GBA_KEY_COUNT, GBA_LINK, GBA_QUICK_SAVE, GBA_QUICK_LOAD,
+   GBA_SHOW, GBA_MOVE, GBA_OPACITY,
+   GBA_INPUT_COUNT
+ };
+@@ -306,6 +306,7 @@ static void UpdateGBAInput()
+   using namespace Libretro::Options;
+   RefreshGBAOptions();
+ #ifdef HAS_LIBMGBA
++  Libretro::GBALink::PollHardcore();
+   Libretro::GBALink::ApplyRoms(input_types, RETRO_DEVICE_GBA_EMU);
+ #endif
+ 
+@@ -440,6 +441,10 @@ static void UpdateGBAInput()
+       }
+       if (inputs[player][GBA_LINK] && !was[player][GBA_LINK])
+         Libretro::GBALink::ToggleLinkCable(port);
++      if (inputs[player][GBA_QUICK_SAVE] && !was[player][GBA_QUICK_SAVE])
++        Libretro::GBALink::QuickState(port, true);
++      if (inputs[player][GBA_QUICK_LOAD] && !was[player][GBA_QUICK_LOAD])
++        Libretro::GBALink::QuickState(port, false);
+ #endif
+     }
+     HW::GBA::PadKeys(port).store(keys, std::memory_order_relaxed);
