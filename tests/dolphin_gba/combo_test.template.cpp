@@ -43,7 +43,7 @@ namespace Libretro { namespace Options {
     const char* FILTER[4]={"fi1","fi2","fi3","fi4"}; const char* BLEND[4]={"bl1","bl2","bl3","bl4"};
     const char* VOLUME[4]={"vo1","vo2","vo3","vo4"}; const char* SPEAKER[4]={"sp1","sp2","sp3","sp4"}; const char* SMOOTH[4]={"sm1","sm2","sm3","sm4"};
     // The buttons in Options.h's order (tools/pr-steps keeps the ones a step has).
-    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","reset","link","qsave","qload","show","move","opacity"};
+    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","reset","link","qsave","qload","show","move","opacity","scan"};
     constexpr int BUTTON_COUNT=sizeof(names)/sizeof(names[0]);
     static std::string keys[4][BUTTON_COUNT];
     static const char* BUTTON[4][BUTTON_COUNT];
@@ -169,6 +169,9 @@ int main(){
   calls.clear(); down[0][RETRO_DEVICE_ID_JOYPAD_R3]=false; down[0][RETRO_DEVICE_ID_JOYPAD_Y]=true; UpdateGBAInput();
   CHECK(calls.size()==2 && calls[0]=="load1" && calls[1]=="load2", "Quick Load on a press");
   opt[B(0,"qsave")]="none"; opt[B(0,"qload")]="none";
+  opt[B(0,"scan")]="select"; calls.clear(); clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_SELECT]=true; UpdateGBAInput(); UpdateGBAInput();
+  CHECK(calls.size()==2 && calls[0]=="scan1" && calls[1]=="scan2", "Scan e-Reader Card: once per press, to each GBA the player plays");
+  opt[B(0,"scan")]="none";
   CHECK(logged("played by player {}{}") >= 1 && logged("played by player {}{}") <= 4, "who plays each GBA is logged on a change, not every frame");
   input_types[2]=RETRO_DEVICE_JOYPAD; defaults();
 

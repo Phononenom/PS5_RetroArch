@@ -1,0 +1,389 @@
+diff --git a/Source/Core/DolphinLibretro/Common/Options.cpp b/Source/Core/DolphinLibretro/Common/Options.cpp
+index c1d19a9..9388527 100644
+--- a/Source/Core/DolphinLibretro/Common/Options.cpp
++++ b/Source/Core/DolphinLibretro/Common/Options.cpp
+@@ -2498,6 +2498,35 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p1_scan",
++    "GBA (Integrated) > Player 1 Scan e-Reader Card",
++    "Player 1 Scan e-Reader Card",
++    "The RetroPad button (after RetroArch's own remapping) for player 1. Scans the card chosen in each of its GBAs' e-Reader Card option into the GBA's e-Reader, again on every press.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p1_show_mode",
+     "GBA (Integrated) > Player 1 Show Screen Button",
+@@ -3049,6 +3078,35 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p2_scan",
++    "GBA (Integrated) > Player 2 Scan e-Reader Card",
++    "Player 2 Scan e-Reader Card",
++    "The RetroPad button (after RetroArch's own remapping) for player 2. Scans the card chosen in each of its GBAs' e-Reader Card option into the GBA's e-Reader, again on every press.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p2_show_mode",
+     "GBA (Integrated) > Player 2 Show Screen Button",
+@@ -3600,6 +3658,35 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p3_scan",
++    "GBA (Integrated) > Player 3 Scan e-Reader Card",
++    "Player 3 Scan e-Reader Card",
++    "The RetroPad button (after RetroArch's own remapping) for player 3. Scans the card chosen in each of its GBAs' e-Reader Card option into the GBA's e-Reader, again on every press.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p3_show_mode",
+     "GBA (Integrated) > Player 3 Show Screen Button",
+@@ -4151,6 +4238,35 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "none"
+   },
++  {
++    "dolphin_gba_p4_scan",
++    "GBA (Integrated) > Player 4 Scan e-Reader Card",
++    "Player 4 Scan e-Reader Card",
++    "The RetroPad button (after RetroArch's own remapping) for player 4. Scans the card chosen in each of its GBAs' e-Reader Card option into the GBA's e-Reader, again on every press.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none",   "None" },
++      { "a",      "A" },
++      { "b",      "B" },
++      { "x",      "X" },
++      { "y",      "Y" },
++      { "l",      "L1" },
++      { "r",      "R1" },
++      { "l2",     "L2" },
++      { "r2",     "R2" },
++      { "l3",     "L3" },
++      { "r3",     "R3" },
++      { "select", "Select" },
++      { "start",  "Start" },
++      { "up",     "D-Pad Up" },
++      { "down",   "D-Pad Down" },
++      { "left",   "D-Pad Left" },
++      { "right",  "D-Pad Right" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     "dolphin_gba_p4_show_mode",
+     "GBA (Integrated) > Player 4 Show Screen Button",
+@@ -4613,6 +4729,58 @@ static struct retro_core_option_v2_definition option_defs[] = {
+     },
+     "disabled"
+   },
++  {
++    "dolphin_gba_port1_card",
++    "GBA (Integrated) > Port 1 e-Reader Card",
++    "Port 1 e-Reader Card",
++    "An e-Reader card (.raw) for port 1's GBA, from system/dolphin-emu/Sys/GBA/ereader (the list is read when the content loads). Choosing one scans it into the GBA's e-Reader; its player's Scan e-Reader Card button scans it again.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none", "None" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
++  {
++    "dolphin_gba_port2_card",
++    "GBA (Integrated) > Port 2 e-Reader Card",
++    "Port 2 e-Reader Card",
++    "An e-Reader card (.raw) for port 2's GBA, from system/dolphin-emu/Sys/GBA/ereader (the list is read when the content loads). Choosing one scans it into the GBA's e-Reader; its player's Scan e-Reader Card button scans it again.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none", "None" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
++  {
++    "dolphin_gba_port3_card",
++    "GBA (Integrated) > Port 3 e-Reader Card",
++    "Port 3 e-Reader Card",
++    "An e-Reader card (.raw) for port 3's GBA, from system/dolphin-emu/Sys/GBA/ereader (the list is read when the content loads). Choosing one scans it into the GBA's e-Reader; its player's Scan e-Reader Card button scans it again.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none", "None" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
++  {
++    "dolphin_gba_port4_card",
++    "GBA (Integrated) > Port 4 e-Reader Card",
++    "Port 4 e-Reader Card",
++    "An e-Reader card (.raw) for port 4's GBA, from system/dolphin-emu/Sys/GBA/ereader (the list is read when the content loads). Choosing one scans it into the GBA's e-Reader; its player's Scan e-Reader Card button scans it again.",
++    nullptr,
++    CATEGORY_GBA,
++    {
++      { "none", "None" },
++      { nullptr, nullptr }
++    },
++    "none"
++  },
+   {
+     Libretro::Options::gba::SAVES_IN_ROM_DIR,
+     "GBA (Integrated) > Save Beside the ROM",
+diff --git a/Source/Core/DolphinLibretro/Common/Options.h b/Source/Core/DolphinLibretro/Common/Options.h
+index a1dae82..2279589 100644
+--- a/Source/Core/DolphinLibretro/Common/Options.h
++++ b/Source/Core/DolphinLibretro/Common/Options.h
+@@ -213,8 +213,8 @@ namespace gba {
+   constexpr const char* STICK[4] = {"dolphin_gba_p1_stick", "dolphin_gba_p2_stick",
+                                     "dolphin_gba_p3_stick", "dolphin_gba_p4_stick"};
+   // Each player's GBA buttons, in GBAInput's order (Input.cpp): the GBA's ten keys in mGBA's bit
+-  // order (A, B, Select, Start, Right, Left, Up, Down, R, L), then Reset, Link Cable, Quick Save, Quick Load, Show Screen, Move Screen, Adjust Opacity.
+-  constexpr int BUTTON_COUNT = 17;
++  // order (A, B, Select, Start, Right, Left, Up, Down, R, L), then Reset, Link Cable, Quick Save, Quick Load, Show Screen, Move Screen, Adjust Opacity, Scan e-Reader Card.
++  constexpr int BUTTON_COUNT = 18;
+ #define DOLPHIN_GBA_BUTTONS(p) \
+   {\
+    "dolphin_gba_" p "_a", \
+@@ -233,7 +233,8 @@ namespace gba {
+    "dolphin_gba_" p "_qload", \
+    "dolphin_gba_" p "_show", \
+    "dolphin_gba_" p "_move", \
+-   "dolphin_gba_" p "_opacity"}
++   "dolphin_gba_" p "_opacity", \
++   "dolphin_gba_" p "_scan"}
+   constexpr const char* BUTTON[4][BUTTON_COUNT] = {DOLPHIN_GBA_BUTTONS("p1"), DOLPHIN_GBA_BUTTONS("p2"),
+                                                    DOLPHIN_GBA_BUTTONS("p3"), DOLPHIN_GBA_BUTTONS("p4")};
+ #undef DOLPHIN_GBA_BUTTONS
+@@ -250,6 +251,7 @@ namespace gba {
+   constexpr const char* POSITION[4] = DOLPHIN_GBA_PORTS("position");
+   constexpr const char* FILTER[4] = DOLPHIN_GBA_PORTS("filter");
+   constexpr const char* BLEND[4] = DOLPHIN_GBA_PORTS("blend");
++  constexpr const char* CARD[4] = DOLPHIN_GBA_PORTS("card");
+ #undef DOLPHIN_GBA_PORTS
+   constexpr const char SAVES_IN_ROM_DIR[] = "dolphin_gba_saves_in_rom_dir";
+ }
+diff --git a/Source/Core/DolphinLibretro/GBALink.cpp b/Source/Core/DolphinLibretro/GBALink.cpp
+index ba25890..d3c9c90 100644
+--- a/Source/Core/DolphinLibretro/GBALink.cpp
++++ b/Source/Core/DolphinLibretro/GBALink.cpp
+@@ -51,6 +51,39 @@ std::string s_states_dir;
+ std::array<std::vector<std::string>, 4> s_choices;
+ // What each port was last given (game, and whether its save sits beside it).
+ std::array<std::string, 4> s_applied;
++// The e-Reader cards in <Sys>/GBA/ereader (the options point into them), and each port's choice
++// as last seen.
++std::vector<std::string> s_cards;
++std::array<std::string, 4> s_card_seen;
++
++bool IsCard(const std::filesystem::path& path)
++{
++  return Common::CaseInsensitiveEquals(path.extension().string(), ".raw");
++}
++
++// Scans the port's chosen card into its GBA's e-Reader (on the CPU thread). False: none chosen.
++bool QueueCard(int port, const std::string& card)
++{
++  if (card.empty() || card == "none")
++    return false;
++  const std::string path = s_rom_root + DIR_SEP "ereader" DIR_SEP + card;
++  if (!File::Exists(path))
++  {
++    ERROR_LOG_FMT(SERIALINTERFACE, "GBA {}: e-Reader card {} not found", port + 1, path);
++    OSD::AddMessage(fmt::format("GBA {}: e-Reader card {} not found", port + 1, card),
++                    OSD::Duration::NORMAL, OSD::Color::RED);
++    return true;
++  }
++  {
++    auto& requests = HW::GBA::RequestsFor(port);
++    std::lock_guard lock(requests.lock);
++    requests.queue.emplace_back(HW::GBA::Request::EReaderCard, path);
++  }
++  OSD::AddMessage(fmt::format("GBA {}: e-Reader card {}", port + 1, card), OSD::Duration::SHORT);
++  INFO_LOG_FMT(SERIALINTERFACE, "GBA {}: e-Reader card {}", port + 1, path);
++  return true;
++}
++
+ bool IsRom(const std::filesystem::path& path)
+ {
+   return Common::CaseInsensitiveEquals(path.extension().string(), ".gba");
+@@ -128,6 +161,36 @@ void PrepareOptions(const std::string& sys_dir, const char* save_dir)
+     def->values[n] = {nullptr, nullptr};
+   }
+ 
++  // The e-Reader cards, the same list for every port.
++  const std::string card_dir = s_rom_root + DIR_SEP "ereader";
++  File::CreateFullPath(card_dir + DIR_SEP);
++  s_cards.clear();
++  std::error_code ec;
++  for (const auto& entry : std::filesystem::directory_iterator(card_dir, ec))
++  {
++    if (entry.is_regular_file(ec) && IsCard(entry.path()))
++      s_cards.push_back(entry.path().filename().string());
++  }
++  std::sort(s_cards.begin(), s_cards.end());
++  if (s_cards.size() > MAX_ROMS)
++  {
++    WARN_LOG_FMT(SERIALINTERFACE, "GBA: {} e-Reader cards found, the first {} are listed",
++                 s_cards.size(), MAX_ROMS);
++    s_cards.resize(MAX_ROMS);
++  }
++  for (int port = 0; port < 4; ++port)
++  {
++    s_card_seen[port].clear();
++    retro_core_option_v2_definition* def = Options::FindDefinition(Options::gba::CARD[port]);
++    if (!def)
++      continue;
++    size_t n = 0;
++    def->values[n++] = {"none", "None"};
++    for (const std::string& card : s_cards)
++      def->values[n++] = {card.c_str(), card.c_str()};
++    def->values[n] = {nullptr, nullptr};
++  }
++
+   const char* states = nullptr;
+   if (environ_cb && environ_cb(ENV_GET_SAVESTATE_DIRECTORY, &states) && states && *states)
+     s_states_dir = std::string(states) + DIR_SEP "GBA";
+@@ -159,6 +222,15 @@ void ApplyRoms(const unsigned* input_types, unsigned gba_device)
+       continue;
+     const bool running = system.GetSerialInterface().GetDeviceType(port) ==
+                          SerialInterface::SIDEVICE_GC_GBA_EMULATED;
++    // A card chosen while the GBA runs is scanned at once (the first look only notes it).
++    const std::string card = Options::GetCached<std::string>(Options::gba::CARD[port], "none");
++    if (card != s_card_seen[port])
++    {
++      const bool first = s_card_seen[port].empty();
++      s_card_seen[port] = card;
++      if (!first && running)
++        QueueCard(port, card);
++    }
+     const std::string rom = WantedRom(port, gba_index++);
+     const std::string key = rom + (here ? "\n1" : "\n0");
+     if (key == s_applied[port])
+@@ -266,6 +338,13 @@ void QuickState(int port, bool save)
+                               path);
+ }
+ 
++void ScanCard(int port)
++{
++  port &= 3;
++  if (!QueueCard(port, Options::GetCached<std::string>(Options::gba::CARD[port], "none")))
++    OSD::AddMessage(fmt::format("GBA {}: no e-Reader card chosen", port + 1), OSD::Duration::SHORT);
++}
++
+ const std::string& StatesDir()
+ {
+   return s_states_dir;
+diff --git a/Source/Core/DolphinLibretro/GBALink.h b/Source/Core/DolphinLibretro/GBALink.h
+index b6117e3..a94beac 100644
+--- a/Source/Core/DolphinLibretro/GBALink.h
++++ b/Source/Core/DolphinLibretro/GBALink.h
+@@ -41,6 +41,11 @@ void ToggleLinkCable(int port);
+ // refused in hardcore.
+ void QuickState(int port, bool save);
+ 
++// A GBA's Scan e-Reader Card button: its e-Reader Card option's card into the GBA's e-Reader
++// (<Sys>/GBA/ereader, on the CPU thread). Choosing a card in the option while the GBA runs scans
++// it too (ApplyRoms).
++void ScanCard(int port);
++
+ // Where the GBAs' save states go: RetroArch's savestate folder (patch 0138) + "/GBA", else the
+ // save folder's User/GBA/States.
+ const std::string& StatesDir();
+diff --git a/Source/Core/DolphinLibretro/Input.cpp b/Source/Core/DolphinLibretro/Input.cpp
+index 2e0e643..b304050 100644
+--- a/Source/Core/DolphinLibretro/Input.cpp
++++ b/Source/Core/DolphinLibretro/Input.cpp
+@@ -145,7 +145,7 @@ enum GBAInput
+   GBA_A, GBA_B, GBA_SELECT, GBA_START, GBA_RIGHT, GBA_LEFT, GBA_UP, GBA_DOWN, GBA_R, GBA_L,
+   GBA_KEY_COUNT,  // the GBA's own keys, mGBA's bit order
+   GBA_RESET = GBA_KEY_COUNT, GBA_LINK, GBA_QUICK_SAVE, GBA_QUICK_LOAD,
+-  GBA_SHOW, GBA_MOVE, GBA_OPACITY,
++  GBA_SHOW, GBA_MOVE, GBA_OPACITY, GBA_SCAN,
+   GBA_INPUT_COUNT
+ };
+ static_assert(GBA_INPUT_COUNT == Libretro::Options::gba::BUTTON_COUNT);
+@@ -445,6 +445,8 @@ static void UpdateGBAInput()
+         Libretro::GBALink::QuickState(port, true);
+       if (inputs[player][GBA_QUICK_LOAD] && !was[player][GBA_QUICK_LOAD])
+         Libretro::GBALink::QuickState(port, false);
++      if (inputs[player][GBA_SCAN] && !was[player][GBA_SCAN])
++        Libretro::GBALink::ScanCard(port);
+ #endif
+     }
+     HW::GBA::PadKeys(port).store(keys, std::memory_order_relaxed);
