@@ -1,0 +1,144 @@
+diff --git a/Source/Core/DolphinLibretro/Input.cpp b/Source/Core/DolphinLibretro/Input.cpp
+index 5250054..cf4601c 100644
+--- a/Source/Core/DolphinLibretro/Input.cpp
++++ b/Source/Core/DolphinLibretro/Input.cpp
+@@ -59,6 +59,29 @@
+ #define RETRO_DEVICE_WIIMOTE_MP_CC ((10 << 8) | RETRO_DEVICE_JOYPAD)
+ #define RETRO_DEVICE_WIIMOTE_MP_CC_PRO ((11 << 8) | RETRO_DEVICE_JOYPAD)
+ 
++// GameCube only: a Game Boy Advance on the link cable, emulated inside the core (libmgba; built
++// with USE_MGBA). A joypad subclass, so RetroArch can remap it as it does a controller.
++#define RETRO_DEVICE_GBA_EMU ((13 << 8) | RETRO_DEVICE_JOYPAD)
++
++// Makes a channel's configured SI device the real one, directly, as this port has always done for
++// controllers. A GBA device is the exception, whether it is being added or replaced: building or
++// tearing one down starts threads and schedules CoreTiming events, which must happen on the CPU
++// thread and, at content load, only once the SI is initialised (a saved remap applies before
++// that, and would crash). Dolphin's own UpdateDevices() does it from the configuration, once a
++// field on the CPU thread, and SI Init does it at boot.
++static void ApplySIDevice(int channel)
++{
++  auto& si = Core::System::GetInstance().GetSerialInterface();
++  const SerialInterface::SIDevices desired = Config::Get(Config::GetInfoForSIDevice(channel));
++  for (const SerialInterface::SIDevices type : {si.GetDeviceType(channel), desired})
++  {
++    if (type == SerialInterface::SIDEVICE_GC_GBA ||
++        type == SerialInterface::SIDEVICE_GC_GBA_EMULATED)
++      return;
++  }
++  si.ChangeDevice(desired, channel);
++}
++
+ /// The same remote with the dongle taken off, so everything downstream stays
+ /// written against the five original ids.
+ static inline unsigned wiimote_base_device(unsigned device)
+@@ -104,6 +127,8 @@ static retro_input_poll_t poll_cb = nullptr;
+ static retro_input_state_t input_cb = nullptr;
+ static struct retro_rumble_interface rumble{};
+ static unsigned input_types[8];
++
++
+ static bool g_init_wiimotes = false;
+ static bool s_sensor_init_pending = false;
+ static bool sensor_enabled[NUM_CONTROLLERS_FOR_SENSORS][SENSOR_COUNT] = {};
+@@ -628,11 +653,19 @@ void InitStage2()
+   }
+   else
+   {
++    // A GameCube game's ports can also hold a GBA: the link cable.
++    static const struct retro_controller_description gc_desc[] = {
++        {"GameCube Controller", RETRO_DEVICE_JOYPAD},
++#ifdef HAS_LIBMGBA
++        {"GBA (Integrated)", RETRO_DEVICE_GBA_EMU},
++#endif
++    };
++
+     static const struct retro_controller_info ports[] = {
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
+-        {gcpad_desc, sizeof(gcpad_desc) / sizeof(*gcpad_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
++        {gc_desc, sizeof(gc_desc) / sizeof(*gc_desc)},
+         {0},
+     };
+ 
+@@ -1144,8 +1177,26 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+   if (((!system.IsWii() || !altGCPorts) && port > 3) || port > 7)
+     return;
+ 
++  // The link cable is a GameCube feature; a saved choice does not carry over to a Wii game.
++#ifdef HAS_LIBMGBA
++  if (device == RETRO_DEVICE_GBA_EMU && system.IsWii())
++    device = RETRO_DEVICE_JOYPAD;
++#else
++  if (device == RETRO_DEVICE_GBA_EMU)  // saved by a build that had libmgba
++    device = RETRO_DEVICE_JOYPAD;
++#endif
++
+   Libretro::Input::input_types[port] = device;
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
++
++#ifdef HAS_LIBMGBA
++  if (device == RETRO_DEVICE_GBA_EMU)
++  {
++    NOTICE_LOG_FMT(BOOT, "Port {}: GBA (Integrated)", port + 1);
++    Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port),
++                             SerialInterface::SIDEVICE_GC_GBA_EMULATED);
++    return;
++  }
++#endif
+ 
+   if (device == RETRO_DEVICE_NONE)
+   {
+@@ -1158,12 +1209,12 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+     if (!system.IsWii() || !altGCPorts)
+     {
+       Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
+-      si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
++      ApplySIDevice(port);
+     }
+     else if (port > 3)
+     {
+       Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port - 4), SerialInterface::SIDEVICE_NONE);
+-      si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port - 4)), port - 4);
++      ApplySIDevice(port - 4);
+     }
+   }
+   else if (!system.IsWii() || device == RETRO_DEVICE_GC_ON_WII || port > 3)
+@@ -1353,7 +1404,6 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+   std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
+   std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
+ #endif
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
+ 
+   if (device == RETRO_DEVICE_GC_ON_WII) // Disconnect Wii device if we're using GC controller as device type to avoid conflict
+     WiimoteCommon::OnSourceChanged(port, WiimoteSource::None);
+@@ -1362,7 +1412,7 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
+ 
+   Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port > 3 ? port - 4 : port),
+     system.IsTriforce() ? SerialInterface::SIDEVICE_AM_BASEBOARD : SerialInterface::SIDEVICE_GC_CONTROLLER);
+-  si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port > 3 ? port - 4 : port)), port > 3 ? port - 4 : port);
++  ApplySIDevice(port > 3 ? port - 4 : port);
+ 
+   GCPad* gcPad = (GCPad*)Pad::GetConfig()->GetController(port > 3 ? port - 4 : port);
+   // load an empty inifile section, clears everything
+@@ -1439,7 +1489,6 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+   std::string devKeyboard = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_KEYBOARD);
+   std::string devLightgun = Libretro::Input::GetQualifiedName(port, RETRO_DEVICE_LIGHTGUN);
+ #endif
+-  auto& si = Core::System::GetInstance().GetSerialInterface();
+ 
+   // Take the dongle off the id and remember it, so the branches below only see
+   // the remotes they were written for.
+@@ -1456,7 +1505,7 @@ void retro_set_controller_port_device_wii(unsigned port, unsigned device)
+   if (!altGCPorts) // Disconnect GC controller to avoid conflict with Wii device
+   {
+     Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_NONE);
+-    si.ChangeDevice(Config::Get(Config::GetInfoForSIDevice(port)), port);
++    ApplySIDevice(port);
+   }
+ 
+   WiimoteEmu::Wiimote* wm = load_saved_controller_config(port, device);
