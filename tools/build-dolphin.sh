@@ -8,9 +8,9 @@
 # the x86-64 JIT (Jit64) with fastmem.
 #
 # The port is patches/dolphin/ps5-port.patch, applied to the pinned tree.
-# The patches in patches/dolphin/gba/, applied after it in order, add the GBA link
-# (the GameCube controller-port device "GBA (Integrated)") and build libmgba in.
-# DOLPHIN_NO_GBA_LINK=1 leaves them out, which builds the port patch alone.
+# patches/dolphin/gba-link.patch, applied after it, adds the GBA link (the
+# GameCube controller-port device "GBA (Integrated)") and builds libmgba in.
+# DOLPHIN_NO_GBA_LINK=1 leaves it out, which builds the port patch alone.
 # DOLPHIN_DEV=1 builds the tree as it stands instead (no reset, no patch),
 # which is how the port is edited: change .deps/dolphin-src, build with
 # DOLPHIN_DEV=1, then write the patch back with
@@ -76,11 +76,8 @@ else
     git -C "$source_dir" clean -qfdx
     git -C "$source_dir" submodule update --init --recursive --quiet --jobs 8
     git -C "$source_dir" apply --whitespace=nowarn "$root/patches/dolphin/ps5-port.patch"
-    if [[ -z ${DOLPHIN_NO_GBA_LINK:-} ]]; then
-        for patch in "$root"/patches/dolphin/gba/*.patch; do
-            git -C "$source_dir" apply --whitespace=nowarn "$patch"
-        done
-    fi
+    [[ -n ${DOLPHIN_NO_GBA_LINK:-} ]] ||
+        git -C "$source_dir" apply --whitespace=nowarn "$root/patches/dolphin/gba-link.patch"
 fi
 got=$(git -C "$source_dir" rev-parse HEAD)
 [[ $got == "$revision" ]] || { echo "error: the tree is at $got, wanted $revision" >&2; exit 2; }
@@ -156,7 +153,7 @@ report['port_inputs_sha256'] = {name: sha(pathlib.Path(name)) for name in
     ['tools/build-dolphin.sh', 'tooling/dolphin/ps5-toolchain.cmake',
      'tooling/dolphin/ps5-libc-shims.cpp', 'tooling/native/core_cxx_runtime.cpp',
      'tooling/native/ps5-core.ld', 'patches/dolphin/ps5-port.patch']
-    + ([] if no_gba_link else sorted(str(p) for p in pathlib.Path('patches/dolphin/gba').glob('*.patch')))}
+    + ([] if no_gba_link else ['patches/dolphin/gba-link.patch'])}
 (build / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
 PY
 [[ -n $nonstandard ]] || core_stamp_write
