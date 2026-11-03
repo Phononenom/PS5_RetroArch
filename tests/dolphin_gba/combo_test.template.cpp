@@ -43,7 +43,7 @@ namespace Libretro { namespace Options {
     const char* FILTER[4]={"fi1","fi2","fi3","fi4"}; const char* BLEND[4]={"bl1","bl2","bl3","bl4"};
     const char* VOLUME[4]={"vo1","vo2","vo3","vo4"}; const char* SPEAKER[4]={"sp1","sp2","sp3","sp4"}; const char* SMOOTH[4]={"sm1","sm2","sm3","sm4"};
     // The buttons in Options.h's order (tools/pr-steps keeps the ones a step has).
-    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","reset","link","qsave","qload","show","move","opacity","scan"};
+    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","reset","link","qsave","qload","show","move","opacity","mute","volume","scan"};
     constexpr int BUTTON_COUNT=sizeof(names)/sizeof(names[0]);
     static std::string keys[4][BUTTON_COUNT];
     static const char* BUTTON[4][BUTTON_COUNT];
@@ -203,6 +203,27 @@ int main(){
     CHECK(windows[1].opacity==60 && windows[1].x==0 && windows[1].y==0 && windows[1].size==3 && windows[1].soft && windows[1].blend, "options: opacity, position, size, filter, blending");
     opt[gba::SCREEN[1]]="on"; UpdateGBAInput(); CHECK(windows[1].shown, "Screen On: shown with nothing held");
     opt[gba::SCREEN[1]]="off"; down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput(); CHECK(!windows[1].shown, "Screen Off: never");
+    defaults(); }
+  { using Libretro::GBALink::volume; using Libretro::GBALink::muted;
+    defaults(); opt[gba::CONTROL[1]]="p1"; opt[B(0,"mute")]="r3"; opt[B(0,"volume")]="x";
+    clear(); UpdateGBAInput();
+    CHECK(volume[1]==100 && !muted[1], "sound: full volume, not muted");
+    opt[gba::VOLUME[1]]="40"; UpdateGBAInput(); CHECK(volume[1]==40, "Volume option 40%");
+    down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput(); UpdateGBAInput();
+    CHECK(muted[1], "Mute: a press mutes (once per press)");
+    down[0][RETRO_DEVICE_ID_JOYPAD_R3]=false; UpdateGBAInput(); down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput();
+    CHECK(!muted[1], "Mute again: sound on");
+    clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_X]=true; down[0][RETRO_DEVICE_ID_JOYPAD_UP]=true; for(int f=0;f<20;++f) UpdateGBAInput();
+    CHECK(volume[1]==50, "Volume held + up: 10% louder in 20 frames");
+    CHECK(keys(1)==0, "while changing volume, the D-pad plays nothing");
+    using Libretro::GBASound::route;
+    CHECK(route[1]==-1 && route[0]==-1, "sound on the TV by default; a port with no GBA is on the TV");
+    opt[gba::SPEAKER[1]]="controller"; UpdateGBAInput(); CHECK(route[1]==0, "Controller Speaker: on player 1's speaker");
+    opt[gba::CONTROL[1]]="p3"; UpdateGBAInput(); CHECK(route[1]==2, "played by player 3: on their speaker");
+    opt[gba::CONTROL[1]]="nobody"; UpdateGBAInput(); CHECK(route[1]==-1, "nobody plays it: back on the TV");
+    using Libretro::GBASound::smooth;
+    CHECK(smooth[1]==1, "speaker resampling: Smooth by default");
+    opt[gba::SMOOTH[1]]="simple"; UpdateGBAInput(); CHECK(smooth[1]==0, "speaker resampling: Simple");
     defaults(); }
   input_types[1]=RETRO_DEVICE_JOYPAD; clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; UpdateGBAInput();
   CHECK(visible==0 && keys(1)==0 && gc(0,RETRO_DEVICE_ID_JOYPAD_L3)==1, "GBA port removed: options hidden, keys cleared, masks off");
