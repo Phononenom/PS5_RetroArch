@@ -43,7 +43,7 @@ namespace Libretro { namespace Options {
     const char* FILTER[4]={"fi1","fi2","fi3","fi4"}; const char* BLEND[4]={"bl1","bl2","bl3","bl4"};
     const char* VOLUME[4]={"vo1","vo2","vo3","vo4"}; const char* SPEAKER[4]={"sp1","sp2","sp3","sp4"}; const char* SMOOTH[4]={"sm1","sm2","sm3","sm4"};
     // The buttons in Options.h's order (tools/pr-steps keeps the ones a step has).
-    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","show"};
+    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","show","move","opacity"};
     constexpr int BUTTON_COUNT=sizeof(names)/sizeof(names[0]);
     static std::string keys[4][BUTTON_COUNT];
     static const char* BUTTON[4][BUTTON_COUNT];
@@ -163,8 +163,10 @@ int main(){
 
   { using Libretro::GBAScreen::windows;
     defaults(); opt[gba::CONTROL[1]]="p1"; opt[B(0,"show")]="r3";
+    opt[B(0,"move")]="x"; opt[B(0,"opacity")]="y";
     clear(); UpdateGBAInput();
     CHECK(!windows[1].shown, "screen: hidden");
+    CHECK(windows[1].x==1000 && windows[1].y==1000, "screen: starts bottom right");
     down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput();
     CHECK(windows[1].shown, "Show Screen held (with the modifier): shown");
     down[0][RETRO_DEVICE_ID_JOYPAD_R3]=false; UpdateGBAInput();
@@ -173,6 +175,14 @@ int main(){
     CHECK(windows[1].shown, "Toggle: a press shows it");
     down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput(); down[0][RETRO_DEVICE_ID_JOYPAD_R3]=false; UpdateGBAInput();
     CHECK(!windows[1].shown, "Toggle: the next hides it");
+    clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_X]=true; down[0][RETRO_DEVICE_ID_JOYPAD_LEFT]=true; down[0][RETRO_DEVICE_ID_JOYPAD_UP]=true; UpdateGBAInput(); UpdateGBAInput();
+    CHECK(windows[1].x==984 && windows[1].y==984, "Move Screen + D-pad up-left moves it");
+    CHECK(keys(1)==0, "while moving, the D-pad plays nothing on the GBA");
+    clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_Y]=true; stick[0][RETRO_DEVICE_ID_ANALOG_Y]=30000; for(int f=0;f<20;++f) UpdateGBAInput();
+    CHECK(windows[1].opacity==90, "Adjust Opacity + stick down: 10% less in 20 frames");
+    CHECK(DolphinInput(0,RETRO_DEVICE_ANALOG,RETRO_DEVICE_INDEX_ANALOG_LEFT,RETRO_DEVICE_ID_ANALOG_Y)==0, "stick hidden from the GameCube while fading");
+    opt[gba::OPACITY[1]]="60"; opt[gba::POSITION[1]]="top_left"; opt[gba::SIZE[1]]="3"; opt[gba::FILTER[1]]="soft"; opt[gba::BLEND[1]]="enabled"; clear(); UpdateGBAInput();
+    CHECK(windows[1].opacity==60 && windows[1].x==0 && windows[1].y==0 && windows[1].size==3 && windows[1].soft && windows[1].blend, "options: opacity, position, size, filter, blending");
     opt[gba::SCREEN[1]]="on"; UpdateGBAInput(); CHECK(windows[1].shown, "Screen On: shown with nothing held");
     opt[gba::SCREEN[1]]="off"; down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput(); CHECK(!windows[1].shown, "Screen Off: never");
     defaults(); }
