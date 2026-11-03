@@ -1,0 +1,1759 @@
+diff --git a/Source/Core/DolphinLibretro/CMakeLists.txt b/Source/Core/DolphinLibretro/CMakeLists.txt
+index 50497a7..723c95d 100644
+--- a/Source/Core/DolphinLibretro/CMakeLists.txt
++++ b/Source/Core/DolphinLibretro/CMakeLists.txt
+@@ -2,6 +2,8 @@
+ add_library(dolphin_libretro SHARED
+   Audio.cpp
+   Boot.cpp
++  GBAWeb.cpp
++  GBAWebSocket.cpp
+   Host.cpp
+   Input.cpp
+   Log.cpp
+diff --git a/Source/Core/DolphinLibretro/GBAWeb.cpp b/Source/Core/DolphinLibretro/GBAWeb.cpp
+new file mode 100644
+index 0000000..59c8186
+--- /dev/null
++++ b/Source/Core/DolphinLibretro/GBAWeb.cpp
+@@ -0,0 +1,1380 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//
++// The integrated GBAs' screens and buttons in a browser: http://<console>:6771/ (one GBA, ?p=1-4)
++// and /multi (several at once). The page and server are Porpoise's (its gba_stream), in PS5-ECAM's
++// remote touch screen's look, with its WebSockets (GBAWebSocket.cpp): a WebSocket each for the
++// pictures (/video) and the buttons (/input).
++//
++// The GBAs run in-process (HW::GBA::Core); this only watches them. Each finished frame goes to a
++// one-slot mailbox per GBA (the newest wins) while someone watches; a thread packs it losslessly
++// (the GBA's 15-bit colour: each pixel XOR the one above, then PackBits-style runs, 'GBA2') and
++// each browser gets the newest packed picture, up to eight ahead of its "ack"s, so a slow round
++// trip does not cap the rate: up to 60 a second, or what the page asks for ("fps 30"). The page's
++// buttons come back as a key mask that SI_DeviceGBAEmu ORs into the GBA's keys (released after two
++// seconds of silence), and its Reset / Disconnect buttons as the same requests the controller's
++// GBA buttons make. Nothing here can make the emulation wait: the GBA thread only takes a mutex
++// for a memcpy-sized copy. Plain POSIX sockets (SO_REUSEADDR: the port is free again at once).
++// Messages are Dolphin's (SERIALINTERFACE: errors and warnings always, the rest at Info / Debug).
++//
++// A frontend that maps the GBA's buttons and shows its screen itself (Porpoise) calls the plain C
++// functions at the end, looked up in the core by name.
++
++#ifdef HAS_LIBMGBA
++
++#include "GBAWeb.h"
++
++#ifdef _WIN32
++
++// The browser page is for the console build.
++namespace Libretro::GBAWeb
++{
++std::unique_ptr<GBAHostInterface> CreateHost(std::weak_ptr<HW::GBA::Core>)
++{
++  return nullptr;
++}
++}  // namespace Libretro::GBAWeb
++
++#else
++
++#include <algorithm>
++#include <atomic>
++#include <cerrno>
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <list>
++#include <mutex>
++#include <span>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include "Common/CommonTypes.h"
++#include "Common/Logging/Log.h"
++#include "Core/HW/GBACore.h"
++#include "Core/HW/GBAExternalKeys.h"
++#include "DolphinLibretro/GBAWebSocket.h"
++
++namespace Libretro::GBAWeb
++{
++namespace
++{
++constexpr u16 PORT = 6771;
++constexpr int MAX_DEVICES = 4;
++constexpr std::size_t MAX_CLIENTS = 32;  // four GBAs on /multi are eight sockets, and a page just
++                                         // left may still hold its own
++constexpr int AHEAD = 8;                 // pictures sent and not yet acknowledged, at most
++constexpr int KEY_QUIET_MS = 2000;       // a page that stops saying what it holds lets go
++constexpr int VIEWER_GRACE_MS = 3000;    // frames are converted this long after dolphin_gba_get_frame
++
++constexpr const char* PAGE = R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
++<title>GBA</title>
++<style>
++:root{color-scheme:dark;--bg:#090e18;--key:#ffffff14;--keyline:#ffffff1f;--on:#4f8fff;--fg:#e8eef8;--dim:#a5b3c7}
++*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:none;user-select:none;-webkit-user-select:none}
++html,body{margin:0;width:100%;height:100%;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif;overflow:hidden}
++[hidden]{display:none!important}
++#app{position:fixed;inset:0;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
++#bar{display:flex;gap:8px;align-items:center;padding:6px 10px;color:var(--dim);font-size:12px;letter-spacing:.04em}
++#status{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
++#bar select,#bar button{background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:999px;padding:4px 10px;font:inherit}
++#screen{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
++canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#000;border-radius:6px;box-shadow:0 24px 80px #0006}
++body.smooth canvas{image-rendering:auto}
++#splash{position:absolute;inset:0;display:grid;place-items:center;background:radial-gradient(ellipse at 30% 25%,#254f7a44,transparent 55%),radial-gradient(ellipse at 80% 80%,#ae7c2526,transparent 50%),var(--bg)}
++.splash{display:flex;flex-direction:column;align-items:center;gap:22px}
++.mark{width:120px;height:120px;display:grid;place-items:center;border:1px solid #ffffff12;border-radius:34px;background:linear-gradient(145deg,#ffffff0b,#ffffff02);font:700 30px system-ui;color:#8bc2ff;letter-spacing:.06em}
++.msg{margin:0;color:var(--dim);font:500 13px/1.5 system-ui,sans-serif;letter-spacing:.12em;text-align:center;max-width:80vw}
++.dots{display:flex;gap:7px}.dots i{width:4px;height:4px;border-radius:50%;background:#8bc2ff;animation:breathe 2s ease-in-out infinite}.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
++@keyframes breathe{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
++@media(prefers-reduced-motion:reduce){.dots i{animation:none;opacity:.6}}
++body.nopad #pad{display:none}
++body.nostatus #status{visibility:hidden}
++#panel{position:fixed;top:44px;right:10px;width:min(360px,calc(100vw - 20px));max-height:calc(100vh - 60px);overflow:auto;background:#0d1424f2;border:1px solid var(--keyline);border-radius:16px;padding:14px;z-index:5;box-shadow:0 24px 80px #000a;touch-action:auto}
++#panel h3{margin:4px 0 10px;font:600 13px system-ui;letter-spacing:.08em;color:var(--dim)}
++#panel label{display:flex;gap:8px;align-items:center;margin:6px 0}
++#panel table{width:100%;border-collapse:collapse;margin:6px 0 10px}
++#panel td{padding:3px 4px}
++#panel td button{width:100%;background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:8px;padding:4px 6px;font:12px system-ui}
++#panel td button.wait{background:var(--on)}
++#panel .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
++#panel .row button{flex:1;background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:999px;padding:6px 10px;font:12px system-ui}
++#panel .danger{border-color:#ff8a8a66!important;color:#ffb3b3!important}
++#pad{display:grid;grid-template-columns:1fr 1fr 1fr;align-items:center;gap:6px;padding:8px 14px 14px;max-width:760px;width:100%;margin:0 auto}
++.grp{position:relative;height:150px}
++.k{position:absolute;display:flex;align-items:center;justify-content:center;background:var(--key);border:1px solid var(--keyline);border-radius:14px;font-weight:600;font-size:15px;color:var(--fg)}
++.k.on{background:var(--on);border-color:#9cc2ff}
++#dpad .k{width:50px;height:50px}
++#up{left:50px;top:0}#down{left:50px;top:100px}#left{left:0;top:50px}#right{left:100px;top:50px}
++#face .k{width:62px;height:62px;border-radius:50%}
++#b{left:6px;top:62px}#a{left:80px;top:30px}
++#mid{display:flex;flex-direction:column;align-items:center;justify-content:space-between;height:150px;padding:6px 0}
++#mid .k{position:static;width:84px;height:34px;font-size:12px;border-radius:999px}
++.sh{display:flex;justify-content:space-between;grid-column:1/4;gap:10px}
++.sh .k{position:static;flex:1;height:40px}
++@media (orientation:landscape) and (max-height:520px){#pad{position:fixed;left:0;right:0;bottom:0;max-width:none;padding:0 18px 10px;pointer-events:none}#pad .k{pointer-events:auto;opacity:.82}.sh{position:fixed;top:44px;left:18px;right:18px}}
++</style></head><body>
++<div id="app">
++ <div id="bar">
++  <span id="status">Connecting&hellip;</span>
++  <select id="port" title="Which GBA" hidden></select>
++  <select id="fps" title="Pictures a second"><option value="60">60 fps</option><option value="30">30 fps</option><option value="20">20 fps</option><option value="15">15 fps</option></select>
++  <button id="look" title="Sharp or smooth pixels">Sharp</button>
++  <button id="padbtn" title="Show or hide the on-screen buttons">Buttons</button>
++  <button id="full" title="Full screen">&#9974;</button>
++  <button id="gear" title="Settings">&#9881;</button>
++  <button id="multi" title="Several GBAs at once">All GBAs</button>
++ </div>
++ <div id="panel" hidden>
++  <h3>PAGE</h3>
++  <label><input type="checkbox" id="showstatus"> Status line</label>
++  <h3>BUTTONS</h3>
++  <table id="binds"></table>
++  <div class="row"><button id="defaults">Default Buttons</button></div>
++  <h3>GBA</h3>
++  <div class="row"><button id="reset" class="danger">Reset GBA</button></div>
++ </div>
++ <div id="screen"><canvas id="cv" width="240" height="160"></canvas>
++  <div id="splash" role="status" aria-live="polite"><div class="splash"><div class="mark">GBA</div>
++   <p class="msg" id="msg">Waiting for the GBA</p><div class="dots" aria-hidden="true"><i></i><i></i><i></i></div></div></div>
++ </div>
++ <div id="pad">
++  <div class="sh"><div class="k" data-k="9">L</div><div class="k" data-k="8">R</div></div>
++  <div class="grp" id="dpad"><div class="k" id="up" data-k="6">&#9650;</div><div class="k" id="down" data-k="7">&#9660;</div><div class="k" id="left" data-k="5">&#9664;</div><div class="k" id="right" data-k="4">&#9654;</div></div>
++  <div id="mid"><div class="k" data-k="2">SELECT</div><div class="k" data-k="3">START</div></div>
++  <div class="grp" id="face"><div class="k" id="b" data-k="1">B</div><div class="k" id="a" data-k="0">A</div></div>
++ </div>
++</div>
++<script>
++(function(){
++'use strict';
++var statusEl=document.getElementById('status'),msgEl=document.getElementById('msg'),splash=document.getElementById('splash');
++var cv=document.getElementById('cv'),ctx=cv.getContext('2d'),box=document.getElementById('screen');
++function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
++function say(t){statusEl.textContent=t}
++/* Which GameCube port's GBA: ?p=N, or the last chosen here, else the lowest with one. */
++var portSel=document.getElementById('port'),port=+(new URLSearchParams(location.search).get('p')||store('gba.port')||0);
++var wsURL=function(p){return(location.protocol==='https:'?'wss://':'ws://')+location.host+p+(port?'?p='+port:'')};
++function loadPorts(){
++ fetch('/ports',{cache:'no-store'}).then(function(r){return r.json()}).then(function(list){
++  if(!Array.isArray(list))return;
++  var h='';list.forEach(function(n){h+='<option value="'+n+'">GBA '+n+'</option>'});
++  if(portSel.innerHTML!==h)portSel.innerHTML=h;
++  portSel.hidden=list.length<2;
++  if(list.length&&list.indexOf(port)<0){port=list[0];reconnect()}
++  portSel.value=String(port);
++ }).catch(function(){});
++}
++portSel.onchange=function(){port=+portSel.value;store('gba.port',String(port));reconnect()};
++function reconnect(){var i=input,v=video;input=video=null;if(i)i.close();if(v)v.close();kbd=0;touch={};connectInput();connectVideo()}
++setInterval(loadPorts,5000);
++
++/* ---- buttons: keyboard + touch + gamepad, as mGBA's key bits (A,B,Select,Start,Right,Left,Up,Down,R,L = 0..9) ---- */
++var kbd=0,touch={},pad=0,input=null,sentMask=-1;
++function mask(){var m=kbd|pad;for(var id in touch)m|=touch[id];return m}
++/* What each GBA button is on: a keyboard key and a gamepad button (the standard mapping's numbers),
++   changed in the settings panel and kept in this browser. Bit 10 is Reset GBA (not a GBA key). */
++var NAMES=['A','B','Select','Start','Right','Left','Up','Down','R','L','Reset GBA'];
++var DEF_KEYS=['KeyX','KeyZ','Backspace','Enter','ArrowRight','ArrowLeft','ArrowUp','ArrowDown','KeyS','KeyA',''];
++var DEF_PAD=[1,0,8,9,15,14,12,13,5,4,-1];
++function loadList(k,d){try{var v=JSON.parse(store(k)||'null');if(Array.isArray(v)&&v.length===d.length)return v}catch(e){}return d.slice()}
++var keys=loadList('gba.keys',DEF_KEYS),padb=loadList('gba.padbtn',DEF_PAD),capture=-1,captureKind='';
++function bitOfKey(code){for(var i=0;i<keys.length;i++)if(keys[i]===code)return i;return -1}
++var resetLatch=false;
++function resetGBA(){if(input&&input.readyState===1)input.send('reset')}
++addEventListener('keydown',function(e){
++ if(capture>=0&&captureKind==='key'){e.preventDefault();if(e.code!=='Escape'){for(var i=0;i<keys.length;i++)if(keys[i]===e.code)keys[i]='';keys[capture]=e.code;store('gba.keys',JSON.stringify(keys))}capture=-1;renderBinds();return}
++ var b=bitOfKey(e.code);if(b<0)return;e.preventDefault();
++ if(b===10){if(!e.repeat)resetGBA();return}
++ kbd|=1<<b;changed()});
++addEventListener('keyup',function(e){var b=bitOfKey(e.code);if(b<0||b===10)return;e.preventDefault();kbd&=~(1<<b);changed()});
++addEventListener('blur',function(){kbd=0;touch={};changed()});
++function paint(){var m=mask();document.querySelectorAll('[data-k]').forEach(function(el){el.classList.toggle('on',!!(m&(1<<el.dataset.k)))})}
++document.querySelectorAll('[data-k]').forEach(function(el){
++ var bit=1<<el.dataset.k;
++ el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);touch[e.pointerId]=(touch[e.pointerId]||0)|bit;changed()});
++ var up=function(e){if(touch[e.pointerId]===undefined)return;touch[e.pointerId]&=~bit;if(!touch[e.pointerId])delete touch[e.pointerId];changed()};
++ el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);el.addEventListener('lostpointercapture',up);
++});
++var padPrev={};
++function pollPad(){
++ var gps=navigator.getGamepads?navigator.getGamepads():[],m=0,rst=false;
++ for(var i=0;i<gps.length;i++){var g=gps[i];if(!g||!g.connected)continue;var b=g.buttons;
++  if(capture>=0&&captureKind==='pad'){
++   for(var n=0;n<b.length;n++)if(b[n].pressed&&!(padPrev[i]&&padPrev[i][n])){for(var j=0;j<padb.length;j++)if(padb[j]===n)padb[j]=-1;padb[capture]=n;store('gba.padbtn',JSON.stringify(padb));capture=-1;renderBinds();break}
++  }else{
++   for(var k=0;k<padb.length;k++){var n2=padb[k];if(n2>=0&&b[n2]&&b[n2].pressed){if(k===10)rst=true;else m|=1<<k}}
++   var x=g.axes[0]||0,y=g.axes[1]||0;if(x>.5)m|=16;if(x<-.5)m|=32;if(y<-.5)m|=64;if(y>.5)m|=128;
++  }
++  padPrev[i]=b.map(function(v){return v.pressed});
++ }
++ if(rst&&!resetLatch)resetGBA();resetLatch=rst;
++ if(m!==pad){pad=m;changed()}
++ requestAnimationFrame(pollPad);
++}
++requestAnimationFrame(pollPad);
++function send(){
++ if(!input||input.readyState!==1)return;
++ if(input.bufferedAmount>1024){input.close();return}  /* reconnect rather than queue old presses */
++ var m=mask();input.send('k '+m);sentMask=m;
++}
++function changed(){paint();send()}
++setInterval(function(){if(mask()!==0)send()},250); /* a held button stays held; the PS5 lets go of a quiet page */
++function connectInput(){
++ if(document.hidden||input)return;
++ var s=new WebSocket(wsURL('/input'));input=s;
++ s.onopen=function(){if(input===s)send()};
++ s.onclose=function(){if(input!==s)return;input=null;if(!document.hidden)setTimeout(connectInput,1000)};
++ s.onerror=function(){s.close()};
++}
++
++/* ---- the settings panel ---- */
++var panel=document.getElementById('panel'),gear=document.getElementById('gear'),binds=document.getElementById('binds');
++var showStatus=store('gba.status')!=='0',statusBox=document.getElementById('showstatus');
++function applyStatus(){document.body.classList.toggle('nostatus',!showStatus);statusBox.checked=showStatus}
++statusBox.onchange=function(){showStatus=statusBox.checked;store('gba.status',showStatus?'1':'0');applyStatus()};
++gear.onclick=function(){panel.hidden=!panel.hidden;capture=-1;renderBinds()};
++function keyName(c){if(!c)return'\u2014';return c.replace(/^Key/,'').replace(/^Digit/,'').replace(/^Arrow/,'\u2192 ').replace('Right','Right')}
++function renderBinds(){
++ var h='<tr><td></td><td>Keyboard</td><td>Gamepad</td></tr>';
++ for(var i=0;i<NAMES.length;i++){
++  var kw=capture===i&&captureKind==='key',pw=capture===i&&captureKind==='pad';
++  h+='<tr><td>'+NAMES[i]+'</td><td><button data-i="'+i+'" data-t="key" class="'+(kw?'wait':'')+'">'+(kw?'Press a key':keyName(keys[i]))+'</button></td>'+
++     '<td><button data-i="'+i+'" data-t="pad" class="'+(pw?'wait':'')+'">'+(pw?'Press a button':(padb[i]>=0?'Button '+padb[i]:'\u2014'))+'</button></td></tr>';
++ }
++ binds.innerHTML=h;
++ binds.querySelectorAll('button').forEach(function(b){
++  b.onclick=function(){var i=+b.dataset.i,t=b.dataset.t;if(capture===i&&captureKind===t){capture=-1}else{capture=i;captureKind=t}renderBinds()};
++  b.oncontextmenu=function(e){e.preventDefault();var i=+b.dataset.i;if(b.dataset.t==='key'){keys[i]='';store('gba.keys',JSON.stringify(keys))}else{padb[i]=-1;store('gba.padbtn',JSON.stringify(padb))}capture=-1;renderBinds()};
++ });
++}
++document.getElementById('defaults').onclick=function(){keys=DEF_KEYS.slice();padb=DEF_PAD.slice();store('gba.keys',JSON.stringify(keys));store('gba.padbtn',JSON.stringify(padb));capture=-1;renderBinds()};
++var resetArmed=0;
++document.getElementById('reset').onclick=function(e){
++ var b=e.target;if(Date.now()-resetArmed<3000){resetArmed=0;resetGBA();b.textContent='Reset GBA';return}
++ resetArmed=Date.now();b.textContent='Press again to reset';setTimeout(function(){if(resetArmed&&Date.now()-resetArmed>=3000){resetArmed=0;b.textContent='Reset GBA'}},3100);
++};
++document.getElementById('multi').onclick=function(){location.href='/multi'};
++applyStatus();renderBinds();
++
++/* ---- layout: the biggest sharp size that fits ---- */
++var padBtn=document.getElementById('padbtn'),fullBtn=document.getElementById('full'),lookBtn=document.getElementById('look');
++var coarse=!!(window.matchMedia&&matchMedia('(pointer:coarse)').matches);
++var padOn=store('gba.pad');padOn=padOn===null?coarse:padOn==='1';
++var smooth=store('gba.smooth')==='1';
++function applyLook(){document.body.classList.toggle('smooth',smooth);lookBtn.textContent=smooth?'Smooth':'Sharp'}
++lookBtn.onclick=function(){smooth=!smooth;store('gba.smooth',smooth?'1':'0');applyLook()};
++function applyPad(){document.body.classList.toggle('nopad',!padOn);fit()}
++padBtn.onclick=function(){padOn=!padOn;store('gba.pad',padOn?'1':'0');applyPad()};
++fullBtn.onclick=function(){try{if(document.fullscreenElement)document.exitFullscreen();else document.documentElement.requestFullscreen()}catch(e){}};
++function fit(){
++ var aw=box.clientWidth,ah=box.clientHeight,w=cv.width,h=cv.height;
++ if(aw<=0||ah<=0)return;
++ var dpr=window.devicePixelRatio||1,k=Math.floor(Math.min(aw*dpr/w,ah*dpr/h)),cw,ch;
++ if(k>=1){cw=w*k/dpr;ch=h*k/dpr}else{var f=Math.min(aw/w,ah/h);cw=w*f;ch=h*f}
++ cv.style.width=cw+'px';cv.style.height=ch+'px';
++}
++addEventListener('resize',fit);
++if(window.ResizeObserver)new ResizeObserver(fit).observe(box);
++applyLook();applyPad();
++
++/* ---- pictures: pushed over /video, lossless ('GBA2': width, height, length, then each pixel XOR the
++   one above as PackBits-style 16-bit runs and literals; 15-bit colour, red in the low bits). Each is
++   answered with "ack" as it arrives, so the PS5 knows how far ahead it is. ---- */
++var fpsSel=document.getElementById('fps'),fps=store('gba.fps')||'60';fpsSel.value=fps;
++var video=null,frames=0,bytes=0,t0=performance.now(),stale=null,img=null,px=null;
++function waiting(t){clearTimeout(stale);stale=null;splash.hidden=false;msgEl.textContent=t}
++fpsSel.onchange=function(){fps=fpsSel.value;store('gba.fps',fps);if(video&&video.readyState===1)video.send('fps '+fps)};
++function shown(){
++ splash.hidden=true;clearTimeout(stale);
++ stale=setTimeout(function(){say('Live  (screen unchanged)  '+cv.width+'x'+cv.height)},1500);
++}
++function draw(buf){
++ if(buf.length<12||buf[0]!==71||buf[1]!==66||buf[2]!==65||buf[3]!==50)return false;
++ var w=buf[4]|(buf[5]<<8),h=buf[6]|(buf[7]<<8),n=w*h,len=buf[8]+buf[9]*256+buf[10]*65536+buf[11]*16777216;
++ if(n<=0||n>240*160||buf.length!==12+len)return false;
++ if(!px||px.length!==n)px=new Uint16Array(n);
++ var i=12,end=12+len,o=0,k,v,c;
++ while(i<end&&o<n){
++  c=buf[i++];
++  if(c<128){k=c+1;if(o+k>n||i+2*k>end)return false;while(k--){px[o++]=buf[i]|(buf[i+1]<<8);i+=2}}
++  else{k=(c&127)+3;if(o+k>n||i+2>end)return false;v=buf[i]|(buf[i+1]<<8);i+=2;while(k--)px[o++]=v}
++ }
++ if(o!==n)return false;
++ for(i=w;i<n;i++)px[i]^=px[i-w];
++ if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;img=null;fit()}
++ if(!img)img=ctx.createImageData(w,h);
++ var d=img.data;
++ for(i=0,o=0;i<n;i++,o+=4){v=px[i];var r=v&31,g=(v>>5)&31,b=(v>>10)&31;d[o]=(r<<3)|(r>>2);d[o+1]=(g<<3)|(g>>2);d[o+2]=(b<<3)|(b>>2);d[o+3]=255}
++ ctx.putImageData(img,0,0);
++ return true;
++}
++function connectVideo(){
++ if(document.hidden||video)return;
++ var s=new WebSocket(wsURL('/video'));video=s;s.binaryType='arraybuffer';
++ s.onopen=function(){if(video!==s)return;s.send('fps '+fps);say('Connected');waiting('Waiting for the GBA')};
++ s.onmessage=function(ev){
++  if(video!==s)return;
++  s.send('ack');
++  var buf=new Uint8Array(ev.data);bytes+=buf.length;
++  if(!draw(buf))return;
++  frames++;shown();
++  var t=performance.now();
++  if(t-t0>1000){var dt=(t-t0)/1000;say('Live  '+Math.round(frames/dt)+' fps  '+cv.width+'x'+cv.height+'  ·  '+(frames?Math.round(bytes/frames/1024*10)/10:0)+' KB/frame');frames=0;bytes=0;t0=t}
++ };
++ s.onclose=function(){if(video!==s)return;video=null;say('Disconnected. Retrying…');waiting('Reconnecting to the PS5');if(!document.hidden)setTimeout(connectVideo,1000)};
++ s.onerror=function(){s.close()};
++}
++function disconnect(){var i=input,v=video;input=video=null;if(i)i.close();if(v)v.close();waiting('Paused')}
++addEventListener('pagehide',disconnect);
++document.addEventListener('visibilitychange',function(){if(document.hidden)disconnect();else{connectInput();connectVideo()}});
++loadPorts();connectInput();connectVideo();
++})();
++</script></body></html>)HTML";
++constexpr const char* MULTI_PAGE = R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
++<title>GBAs</title>
++<style>
++:root{color-scheme:dark;--bg:#090e18;--key:#ffffff14;--keyline:#ffffff1f;--on:#4f8fff;--fg:#e8eef8;--dim:#a5b3c7}
++*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:none;user-select:none;-webkit-user-select:none}
++html,body{margin:0;width:100%;height:100%;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif;overflow:hidden}
++[hidden]{display:none!important}
++#app{position:fixed;inset:0;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
++#bar{display:flex;gap:8px;align-items:center;padding:6px 10px;color:var(--dim);font-size:12px;letter-spacing:.04em}
++#status{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
++#bar select,#bar button{background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:999px;padding:4px 10px;font:inherit}
++#screen{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
++canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#000;border-radius:6px;box-shadow:0 24px 80px #0006}
++body.smooth canvas{image-rendering:auto}
++#splash{position:absolute;inset:0;display:grid;place-items:center;background:radial-gradient(ellipse at 30% 25%,#254f7a44,transparent 55%),radial-gradient(ellipse at 80% 80%,#ae7c2526,transparent 50%),var(--bg)}
++.splash{display:flex;flex-direction:column;align-items:center;gap:22px}
++.mark{width:120px;height:120px;display:grid;place-items:center;border:1px solid #ffffff12;border-radius:34px;background:linear-gradient(145deg,#ffffff0b,#ffffff02);font:700 30px system-ui;color:#8bc2ff;letter-spacing:.06em}
++.msg{margin:0;color:var(--dim);font:500 13px/1.5 system-ui,sans-serif;letter-spacing:.12em;text-align:center;max-width:80vw}
++.dots{display:flex;gap:7px}.dots i{width:4px;height:4px;border-radius:50%;background:#8bc2ff;animation:breathe 2s ease-in-out infinite}.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
++@keyframes breathe{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
++@media(prefers-reduced-motion:reduce){.dots i{animation:none;opacity:.6}}
++body.nopad #pad{display:none}
++body.nostatus #status{visibility:hidden}
++#panel{position:fixed;top:44px;right:10px;width:min(360px,calc(100vw - 20px));max-height:calc(100vh - 60px);overflow:auto;background:#0d1424f2;border:1px solid var(--keyline);border-radius:16px;padding:14px;z-index:5;box-shadow:0 24px 80px #000a;touch-action:auto}
++#panel h3{margin:4px 0 10px;font:600 13px system-ui;letter-spacing:.08em;color:var(--dim)}
++#panel label{display:flex;gap:8px;align-items:center;margin:6px 0}
++#panel table{width:100%;border-collapse:collapse;margin:6px 0 10px}
++#panel td{padding:3px 4px}
++#panel td button{width:100%;background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:8px;padding:4px 6px;font:12px system-ui}
++#panel td button.wait{background:var(--on)}
++#panel .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
++#panel .row button{flex:1;background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:999px;padding:6px 10px;font:12px system-ui}
++#panel .danger{border-color:#ff8a8a66!important;color:#ffb3b3!important}
++#pad{display:grid;grid-template-columns:1fr 1fr 1fr;align-items:center;gap:6px;padding:8px 14px 14px;max-width:760px;width:100%;margin:0 auto}
++.grp{position:relative;height:150px}
++.k{position:absolute;display:flex;align-items:center;justify-content:center;background:var(--key);border:1px solid var(--keyline);border-radius:14px;font-weight:600;font-size:15px;color:var(--fg)}
++.k.on{background:var(--on);border-color:#9cc2ff}
++#dpad .k{width:50px;height:50px}
++#up{left:50px;top:0}#down{left:50px;top:100px}#left{left:0;top:50px}#right{left:100px;top:50px}
++#face .k{width:62px;height:62px;border-radius:50%}
++#b{left:6px;top:62px}#a{left:80px;top:30px}
++#mid{display:flex;flex-direction:column;align-items:center;justify-content:space-between;height:150px;padding:6px 0}
++#mid .k{position:static;width:84px;height:34px;font-size:12px;border-radius:999px}
++.sh{display:flex;justify-content:space-between;grid-column:1/4;gap:10px}
++.sh .k{position:static;flex:1;height:40px}
++@media (orientation:landscape) and (max-height:520px){#pad{position:fixed;left:0;right:0;bottom:0;max-width:none;padding:0 18px 10px;pointer-events:none}#pad .k{pointer-events:auto;opacity:.82}.sh{position:fixed;top:44px;left:18px;right:18px}}
++:root{--tile:#0d1424}
++#grid{flex:1;min-height:0;display:grid;gap:10px;padding:6px 10px;align-items:center;justify-items:center}
++.tile{position:relative;display:flex;flex-direction:column;align-items:center;gap:6px;width:100%;height:100%;min-height:0;justify-content:center;border-radius:10px;border:2px solid transparent;padding:4px}
++.tile.focus{border-color:#4f8fff88}
++.tile canvas{flex:none}
++.tile .cap{display:flex;gap:8px;align-items:center;color:var(--dim);font-size:12px;letter-spacing:.04em}
++.tile .cap select{background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:999px;padding:2px 8px;font:inherit}
++.tile .wait{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);font:500 12px system-ui;letter-spacing:.12em;pointer-events:none}
++#panel .gbas label{display:inline-flex;margin:4px 12px 4px 0}
++.tpad{display:grid;grid-template-columns:auto auto auto;gap:10px;align-items:center;justify-content:center;width:100%}
++.tpad .k{position:static;width:36px;height:36px;border-radius:10px;font-size:12px}
++.tpad .dp{display:grid;grid-template-columns:repeat(3,36px);grid-template-rows:repeat(3,36px);gap:2px}
++.tpad .mid,.tpad .face{display:flex;gap:6px;align-items:center}
++.tpad .mid .k{width:auto;padding:0 8px;border-radius:999px}
++.tpad .face .k{border-radius:50%;width:42px;height:42px}
++.tpad .sh{display:flex;gap:6px;grid-column:1/4;justify-content:center}
++.tpad .sh .k{width:70px}
++body.nopad .tpad{display:none}
++#panel select{background:#ffffff0b;color:var(--fg);border:1px solid var(--keyline);border-radius:999px;padding:2px 8px;font:inherit}
++</style></head><body>
++<div id="app">
++ <div id="bar">
++  <span id="status">Connecting&hellip;</span>
++  <select id="fps" title="Pictures a second"><option value="60">60 fps</option><option value="30">30 fps</option><option value="20">20 fps</option><option value="15">15 fps</option></select>
++  <button id="look" title="Sharp or smooth pixels">Sharp</button>
++  <button id="padbtn" title="Show or hide the on-screen buttons">Buttons</button>
++  <button id="full" title="Full screen">&#9974;</button>
++  <button id="gear" title="Settings">&#9881;</button>
++  <button id="single" title="One GBA">One GBA</button>
++ </div>
++ <div id="panel" hidden>
++  <h3>GBAS SHOWN</h3>
++  <div class="gbas" id="gbas"></div>
++  <h3>PAGE</h3>
++  <label><input type="checkbox" id="showstatus"> Status line</label>
++  <h3>BUTTONS</h3>
++  <label>Keyboard keys for <select id="editgba"></select></label>
++  <table id="binds"></table>
++  <div class="row"><button id="defaults">Default Buttons</button></div>
++  <h3>GBA</h3>
++  <div class="row" id="gbaacts"></div>
++ </div>
++ <div id="grid"></div>
++</div>
++<script>
++(function(){
++'use strict';
++function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
++var statusEl=document.getElementById('status'),grid=document.getElementById('grid');
++function say(t){statusEl.textContent=t}
++function wsURL(p,port){return(location.protocol==='https:'?'wss://':'ws://')+location.host+p+'?p='+port}
++document.getElementById('single').onclick=function(){location.href='/'};
++
++/* ---- the buttons: the single page's, kept in this browser (A,B,Select,Start,Right,Left,Up,Down,R,L = 0..9; 10 Reset GBA) ---- */
++var NAMES=['A','B','Select','Start','Right','Left','Up','Down','R','L','Reset GBA'];
++var DEF_KEYS=['KeyX','KeyZ','Backspace','Enter','ArrowRight','ArrowLeft','ArrowUp','ArrowDown','KeyS','KeyA',''];
++var DEF_PAD=[1,0,8,9,15,14,12,13,5,4,-1];
++function loadList(k,d){try{var v=JSON.parse(store(k)||'null');if(Array.isArray(v)&&v.length===d.length)return v}catch(e){}return d.slice()}
++var keys=loadList('gba.keys',DEF_KEYS),padb=loadList('gba.padbtn',DEF_PAD),capture=-1,captureKind='';
++
++/* ---- each GBA shown: its tile, its two sockets, its own keyboard keys and on-screen buttons, and the
++   gamepad that plays it ('pad0'..'pad3', or 'none') ---- */
++var views={},padMask=[0,0,0,0],padReset=[false,false,false,false],padPrev={};
++var kbdFor={},touchFor={},keysFor={},editPort=0;
++var fps=store('gba.fps')||'60',fpsSel=document.getElementById('fps');fpsSel.value=fps;
++function chosen(){try{var v=JSON.parse(store('gba.multi')||'null');if(Array.isArray(v))return v}catch(e){}return null}
++var ports=[],order=[],firstPort=1;
++/* The first GBA: the keyboard's usual keys and no gamepad; the next ones: no keys, gamepads 1, 2, 3. */
++function who(port){var w=store('gba.multi.who'+port);if(w)return w;var i=order.indexOf(port);return i<=0?'none':'pad'+Math.min(3,i-1)}
++var EMPTY=['','','','','','','','','','',''];
++function keysOf(port){
++ if(!keysFor[port])keysFor[port]=loadList('gba.keys.p'+port,port===firstPort?keys:EMPTY);
++ return keysFor[port];
++}
++function mask(v){
++ var m=kbdFor[v.port]||0,w=who(v.port),t=touchFor[v.port]||{};
++ if(w.indexOf('pad')===0)m|=padMask[+w.slice(3)];
++ for(var id in t)m|=t[id];
++ return m;
++}
++function send(v){
++ if(!v.input||v.input.readyState!==1)return;
++ if(v.input.bufferedAmount>1024){v.input.close();return}
++ v.input.send('k '+mask(v));
++}
++function changed(){paint();for(var p in views)send(views[p])}
++function paint(){for(var p in views){var v=views[p],m=mask(v);v.tile.querySelectorAll('[data-k]').forEach(function(el){el.classList.toggle('on',!!(m&(1<<el.dataset.k)))})}}
++setInterval(function(){for(var p in views)if(mask(views[p]))send(views[p])},250);
++function resetGBA(port){var v=views[port];if(v&&v.input&&v.input.readyState===1)v.input.send('reset')}
++/* A tile's own on-screen buttons. */
++function tilePad(port){
++ var d=document.createElement('div');d.className='tpad';
++ d.innerHTML='<div class="sh"><div class="k" data-k="9">L</div><div class="k" data-k="8">R</div></div>'+
++  '<div class="dp"><span></span><div class="k" data-k="6">&#9650;</div><span></span><div class="k" data-k="5">&#9664;</div><span></span><div class="k" data-k="4">&#9654;</div><span></span><div class="k" data-k="7">&#9660;</div><span></span></div>'+
++  '<div class="mid"><div class="k" data-k="2">SEL</div><div class="k" data-k="3">START</div></div>'+
++  '<div class="face"><div class="k" data-k="1">B</div><div class="k" data-k="0">A</div></div>';
++ d.querySelectorAll('[data-k]').forEach(function(el){
++  var bit=1<<el.dataset.k;
++  el.addEventListener('pointerdown',function(e){e.preventDefault();e.stopPropagation();el.setPointerCapture(e.pointerId);var t=touchFor[port]=touchFor[port]||{};t[e.pointerId]=(t[e.pointerId]||0)|bit;changed()});
++  var up=function(e){var t=touchFor[port]||{};if(t[e.pointerId]===undefined)return;t[e.pointerId]&=~bit;if(!t[e.pointerId])delete t[e.pointerId];changed()};
++  el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);el.addEventListener('lostpointercapture',up);
++ });
++ return d;
++}
++
++function unpack(v,buf){
++ if(buf.length<12||buf[0]!==71||buf[1]!==66||buf[2]!==65||buf[3]!==50)return false;
++ var w=buf[4]|(buf[5]<<8),h=buf[6]|(buf[7]<<8),n=w*h,len=buf[8]+buf[9]*256+buf[10]*65536+buf[11]*16777216;
++ if(n<=0||n>240*160||buf.length!==12+len)return false;
++ if(!v.px||v.px.length!==n)v.px=new Uint16Array(n);
++ var px=v.px,i=12,end=12+len,o=0,k,val,c;
++ while(i<end&&o<n){
++  c=buf[i++];
++  if(c<128){k=c+1;if(o+k>n||i+2*k>end)return false;while(k--){px[o++]=buf[i]|(buf[i+1]<<8);i+=2}}
++  else{k=(c&127)+3;if(o+k>n||i+2>end)return false;val=buf[i]|(buf[i+1]<<8);i+=2;while(k--)px[o++]=val}
++ }
++ if(o!==n)return false;
++ for(i=w;i<n;i++)px[i]^=px[i-w];
++ if(v.cv.width!==w||v.cv.height!==h){v.cv.width=w;v.cv.height=h;v.img=null;fit()}
++ if(!v.img)v.img=v.ctx.createImageData(w,h);
++ var d=v.img.data;
++ for(i=0,o=0;i<n;i++,o+=4){val=px[i];var r=val&31,g=(val>>5)&31,b=(val>>10)&31;d[o]=(r<<3)|(r>>2);d[o+1]=(g<<3)|(g>>2);d[o+2]=(b<<3)|(b>>2);d[o+3]=255}
++ v.ctx.putImageData(v.img,0,0);
++ return true;
++}
++function connect(v){
++ if(document.hidden)return;
++ if(!v.video){
++  var s=new WebSocket(wsURL('/video',v.port));v.video=s;s.binaryType='arraybuffer';
++  s.onopen=function(){if(v.video===s)s.send('fps '+fps)};
++  s.onmessage=function(ev){if(v.video!==s)return;s.send('ack');var b=new Uint8Array(ev.data);v.bytes+=b.length;if(unpack(v,b)){v.frames++;v.wait.hidden=true}};
++  s.onclose=function(){if(v.video!==s)return;v.video=null;v.wait.hidden=false;if(views[v.port]===v&&!document.hidden)setTimeout(function(){connect(v)},1000)};
++  s.onerror=function(){s.close()};
++ }
++ if(!v.input){
++  var t=new WebSocket(wsURL('/input',v.port));v.input=t;
++  t.onopen=function(){if(v.input===t)send(v)};
++  t.onclose=function(){if(v.input!==t)return;v.input=null;if(views[v.port]===v&&!document.hidden)setTimeout(function(){connect(v)},1000)};
++  t.onerror=function(){t.close()};
++ }
++}
++function drop(v){var a=v.video,b=v.input;v.video=v.input=null;if(a)a.close();if(b)b.close()}
++
++/* ---- the grid: the GBAs chosen (all by default), as big as they fit ---- */
++function build(){
++ var want=chosen()||ports;want=want.filter(function(p){return ports.indexOf(p)>=0});
++ for(var p in views)if(want.indexOf(+p)<0){drop(views[p]);delete views[p]}
++ grid.innerHTML='';
++ want.forEach(function(port){
++  var v=views[port];
++  if(!v){
++   v={port:port,video:null,input:null,frames:0,bytes:0,img:null,px:null};
++   v.tile=document.createElement('div');v.tile.className='tile';
++   v.cv=document.createElement('canvas');v.cv.width=240;v.cv.height=160;v.ctx=v.cv.getContext('2d');
++   v.cap=document.createElement('div');v.cap.className='cap';
++   v.wait=document.createElement('div');v.wait.className='wait';v.wait.textContent='WAITING FOR GBA '+port;
++   v.tile.appendChild(v.cv);v.tile.appendChild(v.cap);v.tile.appendChild(tilePad(port));v.tile.appendChild(v.wait);
++   views[port]=v;
++  }
++  var sel='<span>GBA '+port+'</span><select title="The gamepad that plays this GBA (its keyboard keys: Settings)">';
++  [['none','No Gamepad'],['pad0','Gamepad 1'],['pad1','Gamepad 2'],['pad2','Gamepad 3'],['pad3','Gamepad 4']].forEach(function(o){sel+='<option value="'+o[0]+'"'+(who(port)===o[0]?' selected':'')+'>'+o[1]+'</option>'});
++  v.cap.innerHTML=sel+'</select>';
++  v.cap.querySelector('select').onchange=function(e){store('gba.multi.who'+port,e.target.value);changed()};
++  v.cap.querySelector('select').addEventListener('pointerdown',function(e){e.stopPropagation()});
++  grid.appendChild(v.tile);connect(v);
++ });
++ var n=want.length,cols=n<=1?1:n===2?(innerWidth>=innerHeight?2:1):2;
++ grid.style.gridTemplateColumns='repeat('+cols+',1fr)';
++ grid.style.gridTemplateRows='repeat('+Math.ceil(Math.max(n,1)/cols)+',1fr)';
++ if(!n)grid.innerHTML='<div class="wait" style="position:static">NO GBA CHOSEN (SETTINGS)</div>';
++ renderPanel();fit();paint();
++}
++function fit(){
++ var dpr=window.devicePixelRatio||1;
++ for(var p in views){
++  var v=views[p],tp=v.tile.querySelector('.tpad'),ph=tp&&!document.body.classList.contains('nopad')?tp.offsetHeight+8:0;
++  var aw=v.tile.clientWidth-12,ah=v.tile.clientHeight-36-ph,w=v.cv.width,h=v.cv.height;
++  if(aw<=0||ah<=0)continue;
++  var k=Math.floor(Math.min(aw*dpr/w,ah*dpr/h)),cw,ch;
++  if(k>=1){cw=w*k/dpr;ch=h*k/dpr}else{var f=Math.min(aw/w,ah/h);cw=w*f;ch=h*f}
++  v.cv.style.width=cw+'px';v.cv.style.height=ch+'px';
++ }
++}
++addEventListener('resize',function(){build()});
++function loadPorts(){
++ fetch('/ports',{cache:'no-store'}).then(function(r){return r.json()}).then(function(list){
++  if(!Array.isArray(list))return;
++  if(JSON.stringify(list)!==JSON.stringify(ports)){ports=list;order=list.slice();firstPort=list.length?list[0]:1;build()}
++ }).catch(function(){});
++}
++setInterval(loadPorts,5000);
++setInterval(function(){var parts=[];for(var p in views){parts.push('GBA '+p+' '+views[p].frames+' fps');views[p].frames=0}say(parts.length?'Live  '+parts.join('  \u00b7  '):'Waiting')},1000);
++
++/* ---- keyboard, gamepads, the on-screen buttons ---- */
++addEventListener('keydown',function(e){
++ if(capture>=0&&captureKind==='key'){
++  e.preventDefault();
++  if(e.code!=='Escape'){
++   /* One button of this GBA (taken from its other button, if it had it); other GBAs may share it. */
++   var mine=keysOf(editPort);
++   for(var i=0;i<mine.length;i++)if(mine[i]===e.code)mine[i]='';
++   mine[capture]=e.code;store('gba.keys.p'+editPort,JSON.stringify(mine));
++  }
++  capture=-1;renderBinds();return;
++ }
++ var hit=false;
++ for(var p in views){
++  var b=keysOf(+p).indexOf(e.code);if(b<0||!e.code)continue;hit=true;
++  if(b===10){if(!e.repeat)resetGBA(+p);continue}
++  kbdFor[p]=(kbdFor[p]||0)|(1<<b);
++ }
++ if(hit){e.preventDefault();changed()}
++});
++addEventListener('keyup',function(e){
++ var hit=false;
++ for(var p in views){var b=keysOf(+p).indexOf(e.code);if(b<0||b===10||!e.code)continue;hit=true;kbdFor[p]=(kbdFor[p]||0)&~(1<<b)}
++ if(hit){e.preventDefault();changed()}
++});
++addEventListener('blur',function(){kbdFor={};touchFor={};changed()});
++function pollPads(){
++ var gps=navigator.getGamepads?navigator.getGamepads():[],any=false;
++ for(var i=0;i<4;i++){
++  var g=gps[i],m=0,rst=false;
++  if(g&&g.connected){var b=g.buttons;
++   if(capture>=0&&captureKind==='pad'){
++    for(var n=0;n<b.length;n++)if(b[n].pressed&&!(padPrev[i]&&padPrev[i][n])){for(var j=0;j<padb.length;j++)if(padb[j]===n)padb[j]=-1;padb[capture]=n;store('gba.padbtn',JSON.stringify(padb));capture=-1;renderBinds();break}
++   }else{
++    for(var k=0;k<padb.length;k++){var n2=padb[k];if(n2>=0&&b[n2]&&b[n2].pressed){if(k===10)rst=true;else m|=1<<k}}
++    var x=g.axes[0]||0,y=g.axes[1]||0;if(x>.5)m|=16;if(x<-.5)m|=32;if(y<-.5)m|=64;if(y>.5)m|=128;
++   }
++   padPrev[i]=b.map(function(v){return v.pressed});
++  }
++  if(rst&&!padReset[i])for(var p in views)if(who(+p)==='pad'+i)resetGBA(+p);
++  padReset[i]=rst;
++  if(m!==padMask[i]){padMask[i]=m;any=true}
++ }
++ if(any)changed();
++ requestAnimationFrame(pollPads);
++}
++requestAnimationFrame(pollPads);
++
++/* ---- the bar and the settings panel ---- */
++var panel=document.getElementById('panel'),binds=document.getElementById('binds');
++fpsSel.onchange=function(){fps=fpsSel.value;store('gba.fps',fps);for(var p in views){var s=views[p].video;if(s&&s.readyState===1)s.send('fps '+fps)}};
++var smooth=store('gba.smooth')==='1',lookBtn=document.getElementById('look');
++function applyLook(){document.body.classList.toggle('smooth',smooth);lookBtn.textContent=smooth?'Smooth':'Sharp'}
++lookBtn.onclick=function(){smooth=!smooth;store('gba.smooth',smooth?'1':'0');applyLook()};
++var coarse=!!(window.matchMedia&&matchMedia('(pointer:coarse)').matches),padOn=store('gba.pad');padOn=padOn===null?coarse:padOn==='1';
++function applyPad(){document.body.classList.toggle('nopad',!padOn);fit()}
++document.getElementById('padbtn').onclick=function(){padOn=!padOn;store('gba.pad',padOn?'1':'0');applyPad()};
++document.getElementById('full').onclick=function(){try{if(document.fullscreenElement)document.exitFullscreen();else document.documentElement.requestFullscreen()}catch(e){}};
++var showStatus=store('gba.status')!=='0',statusBox=document.getElementById('showstatus');
++function applyStatus(){document.body.classList.toggle('nostatus',!showStatus);statusBox.checked=showStatus}
++statusBox.onchange=function(){showStatus=statusBox.checked;store('gba.status',showStatus?'1':'0');applyStatus()};
++document.getElementById('gear').onclick=function(){panel.hidden=!panel.hidden;capture=-1;renderPanel()};
++function renderPanel(){
++ var want=chosen()||ports,h='';
++ ports.forEach(function(p){h+='<label><input type="checkbox" data-p="'+p+'"'+(want.indexOf(p)>=0?' checked':'')+'> GBA '+p+'</label>'});
++ var g=document.getElementById('gbas');g.innerHTML=h||'No GBAs';
++ g.querySelectorAll('input').forEach(function(c){c.onchange=function(){var list=[];g.querySelectorAll('input').forEach(function(x){if(x.checked)list.push(+x.dataset.p)});store('gba.multi',JSON.stringify(list));build()}});
++ var a='';Object.keys(views).forEach(function(p){a+='<button class="danger" data-r="'+p+'">Reset GBA '+p+'</button><button data-l="'+p+'">Link GBA '+p+'</button>'});
++ var acts=document.getElementById('gbaacts');acts.innerHTML=a;
++ acts.querySelectorAll('[data-r]').forEach(function(b){var armed=0;b.onclick=function(){if(Date.now()-armed<3000){armed=0;resetGBA(+b.dataset.r);b.textContent='Reset GBA '+b.dataset.r;return}armed=Date.now();b.textContent='Press again'}});
++ acts.querySelectorAll('[data-l]').forEach(function(b){b.onclick=function(){var v=views[b.dataset.l];if(v&&v.input&&v.input.readyState===1)v.input.send('disconnect')}});
++ var es=document.getElementById('editgba'),eh='';
++ Object.keys(views).forEach(function(p){eh+='<option value="'+p+'">GBA '+p+'</option>'});
++ es.innerHTML=eh||'<option value="0">\u2014</option>';
++ if(!views[editPort])editPort=+(Object.keys(views)[0]||0);
++ es.value=String(editPort);
++ es.onchange=function(){editPort=+es.value;capture=-1;renderBinds()};
++ renderBinds();
++}
++function keyName(c){if(!c)return'\u2014';return c.replace(/^Key/,'').replace(/^Digit/,'').replace(/^Arrow/,'\u2192 ')}
++function renderBinds(){
++ var h='<tr><td></td><td>GBA '+editPort+' keys</td><td>Every gamepad</td></tr>';
++ for(var i=0;i<NAMES.length;i++){
++  var kw=capture===i&&captureKind==='key',pw=capture===i&&captureKind==='pad';
++  h+='<tr><td>'+NAMES[i]+'</td><td><button data-i="'+i+'" data-t="key" class="'+(kw?'wait':'')+'">'+(kw?'Press a key':keyName(keysOf(editPort)[i]))+'</button></td>'+
++     '<td><button data-i="'+i+'" data-t="pad" class="'+(pw?'wait':'')+'">'+(pw?'Press a button':(padb[i]>=0?'Button '+padb[i]:'\u2014'))+'</button></td></tr>';
++ }
++ binds.innerHTML=h;
++ binds.querySelectorAll('button').forEach(function(b){
++  b.onclick=function(){var i=+b.dataset.i,t=b.dataset.t;if(capture===i&&captureKind===t)capture=-1;else{capture=i;captureKind=t}renderBinds()};
++  b.oncontextmenu=function(e){e.preventDefault();var i=+b.dataset.i;if(b.dataset.t==='key'){var ks=keysOf(editPort);ks[i]='';store('gba.keys.p'+editPort,JSON.stringify(ks))}else{padb[i]=-1;store('gba.padbtn',JSON.stringify(padb))}capture=-1;renderBinds()};
++ });
++}
++document.getElementById('defaults').onclick=function(){
++ /* The usual keys on the GBA being edited (the others keep theirs, shared or not), the gamepads' usual buttons. */
++ keysFor[editPort]=DEF_KEYS.slice();store('gba.keys.p'+editPort,JSON.stringify(keysFor[editPort]));
++ padb=DEF_PAD.slice();store('gba.padbtn',JSON.stringify(padb));capture=-1;renderBinds()};
++document.addEventListener('visibilitychange',function(){for(var p in views){if(document.hidden)drop(views[p]);else connect(views[p])}});
++applyLook();applyPad();applyStatus();loadPorts();
++})();
++</script></body></html>)HTML";
++
++struct Slot
++{
++  bool active = false;
++  u16 width = 240;
++  u16 height = 160;
++  u32 seq = 0;
++  std::vector<u16> pixels;
++  // The newest packed picture made of it, for the browsers.
++  std::vector<u8> packed;
++  u32 packed_seq = 0;
++};
++
++struct Client
++{
++  std::thread thread;
++  std::atomic<bool> done{false};
++};
++
++struct PortState
++{
++  std::atomic<int> viewers{0};  // open /video sockets
++  std::atomic<bool> republish{false};  // a page just came: send it the picture again, fresh
++  std::atomic<u64> key_owner{0};
++};
++
++struct State
++{
++  std::mutex lifecycle;  // hosts coming and going, the server's start / stop
++  std::mutex m;          // the slots
++  std::condition_variable raw_ready, packed_ready;
++  Slot slots[MAX_DEVICES];
++  PortState ports[MAX_DEVICES];
++  int refs = 0;
++  bool server_wanted = true;  // dolphin_gba_set_web_server: off, the GBA runs with no page
++  std::atomic<long long> last_view_ms{0};  // the latest dolphin_gba_get_frame
++  std::atomic<bool> stop{false};
++  std::atomic<u64> next_id{1};
++  int listener = -1;
++  std::thread accept_thread, encode_thread;
++  std::list<Client> clients;  // the accept thread's, and StopServer's once that has been joined
++  // Counted for the five-second Debug line while someone watches.
++  std::atomic<unsigned> converted{0}, encoded{0}, sent{0};
++  std::atomic<unsigned long long> bytes{0};
++};
++
++// Never destroyed: the core's static destructors may run with nothing left to stop.
++State& S()
++{
++  static State* state = new State;
++  return *state;
++}
++
++long long NowMs()
++{
++  return std::chrono::duration_cast<std::chrono::milliseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++bool Alive()
++{
++  return !S().stop.load(std::memory_order_relaxed);
++}
++
++int Viewers()
++{
++  int n = 0;
++  for (const PortState& p : S().ports)
++    n += p.viewers.load(std::memory_order_relaxed);
++  return n;
++}
++
++// ---- the pictures, packed ----------------------------------------------------------------------
++
++// Each pixel XOR the one above, then PackBits-style 16-bit symbols: a control byte below 128 is
++// that many plus one literals that follow, 128 and up a run of (byte - 125) copies of the one that
++// follows. A message is 'G' 'B' 'A' '2', width and height (u16 LE), the packed length (u32 LE),
++// the data.
++void Pack(const std::vector<u16>& px, unsigned width, unsigned height, std::vector<u8>& out)
++{
++  const std::size_t n = px.size();
++  std::vector<u16> d(n);
++  for (std::size_t i = 0; i < n; ++i)
++    d[i] = i < width ? px[i] : static_cast<u16>(px[i] ^ px[i - width]);
++  out.assign(12, 0);
++  out.reserve(n / 2 + 16);
++  const auto put16 = [&out](u16 v) {
++    out.push_back(static_cast<u8>(v & 0xFF));
++    out.push_back(static_cast<u8>(v >> 8));
++  };
++  std::size_t i = 0;
++  while (i < n)
++  {
++    std::size_t run = 1;
++    while (i + run < n && d[i + run] == d[i] && run < 130)
++      ++run;
++    if (run >= 3)
++    {
++      out.push_back(static_cast<u8>(0x80 | (run - 3)));
++      put16(d[i]);
++      i += run;
++      continue;
++    }
++    const std::size_t start = i;
++    std::size_t count = 0;
++    while (i < n && count < 128)
++    {
++      std::size_t r = 1;
++      while (i + r < n && d[i + r] == d[i] && r < 3)
++        ++r;
++      if (r >= 3)
++        break;
++      ++i;
++      ++count;
++    }
++    out.push_back(static_cast<u8>(count - 1));
++    for (std::size_t k = 0; k < count; ++k)
++      put16(d[start + k]);
++  }
++  const u32 len = static_cast<u32>(out.size() - 12);
++  const u8 head[12] = {'G',
++                       'B',
++                       'A',
++                       '2',
++                       static_cast<u8>(width),
++                       static_cast<u8>(width >> 8),
++                       static_cast<u8>(height),
++                       static_cast<u8>(height >> 8),
++                       static_cast<u8>(len),
++                       static_cast<u8>(len >> 8),
++                       static_cast<u8>(len >> 16),
++                       static_cast<u8>(len >> 24)};
++  std::copy(head, head + 12, out.begin());
++}
++
++// Packs each GBA's newest picture once, for every browser that shows it.
++void EncodeLoop()
++{
++  State& s = S();
++  std::vector<u16> px;
++  std::vector<u8> out;
++  while (Alive())
++  {
++    int which = -1;
++    unsigned w = 0, h = 0;
++    u32 seq = 0;
++    {
++      std::unique_lock lock(s.m);
++      const auto pending = [&] {
++        for (int p = 0; p < MAX_DEVICES; ++p)
++        {
++          if (s.slots[p].seq != s.slots[p].packed_seq &&
++              s.ports[p].viewers.load(std::memory_order_relaxed) > 0 && !s.slots[p].pixels.empty())
++            return p;
++        }
++        return -1;
++      };
++      s.raw_ready.wait_for(lock, std::chrono::milliseconds(100),
++                           [&] { return s.stop.load() || pending() >= 0; });
++      if (s.stop.load())
++        return;
++      which = pending();
++      if (which < 0)
++        continue;
++      const Slot& slot = s.slots[which];
++      px = slot.pixels;
++      w = slot.width;
++      h = slot.height;
++      seq = slot.seq;
++    }
++    Pack(px, w, h, out);
++    {
++      std::lock_guard lock(s.m);
++      s.slots[which].packed.swap(out);
++      s.slots[which].packed_seq = seq;
++    }
++    ++s.encoded;
++    s.packed_ready.notify_all();
++  }
++}
++
++// ---- the sockets -------------------------------------------------------------------------------
++
++void Reply(int fd, int code, const char* reason, const char* type, const std::string& body)
++{
++  char head[256];
++  const int n = std::snprintf(head, sizeof head,
++                              "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
++                              "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
++                              code, reason, type, body.size());
++  ps5stream::SendBytes(fd, head, static_cast<std::size_t>(n), Alive);
++  ps5stream::SendBytes(fd, body.data(), body.size(), Alive);
++}
++
++// Pictures as they come, up to AHEAD before the page's "ack"s; "fps N" (60, 30, 20, 15) spaces
++// them. A slow page gets the newest when there's room, never a queue.
++void Video(ps5stream::WebSocket& socket, int port)
++{
++  State& s = S();
++  PortState& ps = s.ports[port];
++  ++ps.viewers;
++  ps.republish.store(true);
++  s.raw_ready.notify_all();  // a picture kept from before can be packed for this one now
++  DEBUG_LOG_FMT(SERIALINTERFACE, "GBA web: a browser is watching GBA {}", port + 1);
++  int ahead = 0, fps = 60;
++  u32 sent_seq = 0;
++  long long last_sent = 0;
++  std::vector<u8> picture;
++  std::string message;
++  for (;;)
++  {
++    const auto r = socket.Receive(message, ahead >= AHEAD ? 20 : 1);
++    if (r == ps5stream::WebSocket::Result::Closed || r == ps5stream::WebSocket::Result::Error)
++      break;
++    if (r == ps5stream::WebSocket::Result::Text)
++    {
++      if (message == "ack")
++        ahead = std::max(0, ahead - 1);
++      else if (message.rfind("fps ", 0) == 0)
++        fps = std::clamp(std::atoi(message.c_str() + 4), 1, 60);
++      continue;
++    }
++    if (ahead >= AHEAD)
++      continue;
++    const long long gap = 1000 / fps - 2;  // a little early rather than a frame late
++    if (NowMs() - last_sent < gap)
++      continue;
++    {
++      std::unique_lock lock(s.m);
++      const Slot& slot = s.slots[port];
++      s.packed_ready.wait_for(lock, std::chrono::milliseconds(15), [&] {
++        return s.stop.load() || (slot.packed_seq != sent_seq && !slot.packed.empty());
++      });
++      if (s.stop.load())
++        break;
++      if (slot.packed_seq == sent_seq || slot.packed.empty())
++        continue;
++      picture = slot.packed;
++      sent_seq = slot.packed_seq;
++    }
++    if (!socket.Send(2, picture.data(), picture.size()))
++      break;
++    last_sent = NowMs();
++    ++ahead;
++    ++s.sent;
++    s.bytes += picture.size();
++  }
++  --ps.viewers;
++  DEBUG_LOG_FMT(SERIALINTERFACE, "GBA web: a browser stopped watching GBA {}", port + 1);
++}
++
++// "k <mask>": the buttons held, sent on each change and every quarter second while any is;
++// "reset": the page's Reset GBA.
++void Input(ps5stream::WebSocket& socket, int port)
++{
++  State& s = S();
++  PortState& ps = s.ports[port];
++  const u64 me = s.next_id++;
++  long long keys_ms = 0;
++  std::string message;
++  for (;;)
++  {
++    const auto r = socket.Receive(message, 200);
++    if (r == ps5stream::WebSocket::Result::Closed || r == ps5stream::WebSocket::Result::Error)
++      break;
++    // A held button the page stopped refreshing (a lost network) must not stay held.
++    if (keys_ms && NowMs() - keys_ms > KEY_QUIET_MS && ps.key_owner.load() == me)
++    {
++      HW::GBA::ExternalKeys(port).store(0);
++      keys_ms = 0;
++    }
++    if (r != ps5stream::WebSocket::Result::Text)
++      continue;
++    if (message == "reset")
++    {
++      HW::GBA::ResetRequest(port).store(true);
++      INFO_LOG_FMT(SERIALINTERFACE, "GBA {}: Reset from the page", port + 1);
++    }
++    else if (message.rfind("k ", 0) == 0)
++    {
++      const long mask = std::strtol(message.c_str() + 2, nullptr, 10);
++      HW::GBA::ExternalKeys(port).store(static_cast<u16>(mask & 0x3FF));
++      ps.key_owner.store(me);
++      keys_ms = NowMs();
++    }
++  }
++  if (ps.key_owner.load() == me)
++    HW::GBA::ExternalKeys(port).store(0);
++}
++
++unsigned ActivePorts()
++{
++  State& s = S();
++  std::lock_guard lock(s.m);
++  unsigned ports = 0;
++  for (int i = 0; i < MAX_DEVICES; ++i)
++  {
++    if (s.slots[i].active)
++      ports |= 1u << i;
++  }
++  return ports;
++}
++
++void Handle(int fd, Client* client)
++{
++  ps5stream::ConfigureSocket(fd);
++  std::string request;
++  const long long until = NowMs() + 5000;
++  while (request.find("\r\n\r\n") == std::string::npos && request.size() < 8192 &&
++         NowMs() < until && Alive())
++  {
++    pollfd p{fd, POLLIN, 0};
++    if (poll(&p, 1, 50) <= 0)
++      continue;
++    char buf[1024];
++    const auto n = recv(fd, buf, sizeof buf, 0);
++    if (n <= 0)
++      break;
++    request.append(buf, static_cast<std::size_t>(n));
++  }
++  const std::size_t sp1 = request.find(' ');
++  const std::size_t sp2 = sp1 == std::string::npos ? sp1 : request.find(' ', sp1 + 1);
++  std::string path = sp2 == std::string::npos ? "" : request.substr(sp1 + 1, sp2 - sp1 - 1);
++  const std::size_t q = path.find('?');
++  const std::string query = q == std::string::npos ? "" : path.substr(q + 1);
++  path = path.substr(0, q);
++  // ?p=1..4: which port's GBA; otherwise the lowest with one.
++  int port = -1;
++  const std::size_t pp = query.find("p=");
++  if (pp != std::string::npos && (pp == 0 || query[pp - 1] == '&'))
++    port = std::atoi(query.c_str() + pp + 2) - 1;
++  const unsigned ports = ActivePorts();
++  if (port < 0 || port >= MAX_DEVICES || !(ports & (1u << port)))
++  {
++    port = 0;
++    for (int i = 0; i < MAX_DEVICES; ++i)
++    {
++      if (ports & (1u << i))
++      {
++        port = i;
++        break;
++      }
++    }
++  }
++  if (request.rfind("GET ", 0) != 0)
++  {
++    Reply(fd, request.empty() ? 408 : 405, request.empty() ? "Request Timeout" : "Method Not Allowed",
++          "text/plain", "GET only\n");
++  }
++  else if (path == "/" || path == "/index.html")
++  {
++    Reply(fd, 200, "OK", "text/html; charset=utf-8", PAGE);
++  }
++  else if (path == "/multi")
++  {
++    Reply(fd, 200, "OK", "text/html; charset=utf-8", MULTI_PAGE);
++  }
++  else if (path == "/ports")
++  {
++    // The ports with a GBA, as a JSON list of 1..4.
++    std::string list = "[";
++    for (int i = 0; i < MAX_DEVICES; ++i)
++    {
++      if (ports & (1u << i))
++        list += (list.size() > 1 ? "," : "") + std::to_string(i + 1);
++    }
++    Reply(fd, 200, "OK", "application/json", list + "]");
++  }
++  else if (path == "/video" || path == "/input")
++  {
++    ps5stream::WebSocket socket(fd, Alive);
++    if (!socket.Upgrade(request))
++      Reply(fd, 400, "Bad Request", "text/plain", "a WebSocket is expected here\n");
++    else if (path == "/video")
++      Video(socket, port);
++    else
++      Input(socket, port);
++  }
++  else
++  {
++    Reply(fd, 404, "Not Found", "text/plain", "not here\n");
++  }
++  close(fd);
++  client->done = true;
++}
++
++void AcceptLoop()
++{
++  State& s = S();
++  long long last_report = NowMs();
++  unsigned rep_conv = 0, rep_enc = 0, rep_sent = 0;
++  unsigned long long rep_bytes = 0;
++  while (Alive())
++  {
++    pollfd p{s.listener, POLLIN, 0};
++    if (poll(&p, 1, 100) > 0)
++    {
++      const int fd = accept(s.listener, nullptr, nullptr);
++      if (fd >= 0)
++      {
++        if (s.clients.size() >= MAX_CLIENTS)
++        {
++          WARN_LOG_FMT(SERIALINTERFACE, "GBA web: a browser turned away ({} connections open)",
++                       s.clients.size());
++          close(fd);
++        }
++        else
++        {
++          s.clients.emplace_back();
++          Client* c = &s.clients.back();
++          c->thread = std::thread(Handle, fd, c);
++        }
++      }
++    }
++    for (auto it = s.clients.begin(); it != s.clients.end();)
++    {
++      if (it->done.load())
++      {
++        it->thread.join();
++        it = s.clients.erase(it);
++      }
++      else
++      {
++        ++it;
++      }
++    }
++    if (NowMs() - last_report >= 5000)
++    {
++      last_report = NowMs();
++      const unsigned conv = s.converted.load(), enc = s.encoded.load(), snt = s.sent.load();
++      const unsigned long long b = s.bytes.load();
++      if (snt != rep_sent)
++      {
++        DEBUG_LOG_FMT(SERIALINTERFACE,
++                      "GBA web: last 5 s: {} new pictures, {} packed, {} sent, {} KiB ({} browsers)",
++                      conv - rep_conv, enc - rep_enc, snt - rep_sent, (b - rep_bytes) / 1024,
++                      Viewers());
++      }
++      rep_conv = conv, rep_enc = enc, rep_sent = snt, rep_bytes = b;
++    }
++  }
++}
++
++void StartServer(State& s)  // with s.lifecycle held
++{
++  if (s.accept_thread.joinable())
++    return;
++  const int fd = socket(AF_INET, SOCK_STREAM, 0);
++  if (fd < 0)
++  {
++    ERROR_LOG_FMT(SERIALINTERFACE, "GBA web: no socket (errno {})", errno);
++    return;
++  }
++  int yes = 1;
++  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
++  sockaddr_in addr{};
++  addr.sin_family = AF_INET;
++  addr.sin_port = htons(PORT);
++  addr.sin_addr.s_addr = htonl(INADDR_ANY);
++  if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 || listen(fd, 8) != 0)
++  {
++    ERROR_LOG_FMT(SERIALINTERFACE, "GBA web: cannot listen on port {} (errno {})", PORT, errno);
++    close(fd);
++    return;
++  }
++  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
++  s.stop = false;
++  s.listener = fd;
++  s.accept_thread = std::thread(AcceptLoop);
++  s.encode_thread = std::thread(EncodeLoop);
++  INFO_LOG_FMT(SERIALINTERFACE, "GBA web: serving on port {}", PORT);
++}
++
++void StopServer(State& s)  // with s.lifecycle held
++{
++  if (!s.accept_thread.joinable())
++    return;
++  s.stop = true;
++  s.raw_ready.notify_all();
++  s.packed_ready.notify_all();
++  s.accept_thread.join();
++  s.encode_thread.join();
++  for (Client& c : s.clients)
++    c.thread.join();
++  s.clients.clear();
++  close(s.listener);
++  s.listener = -1;
++  s.stop = false;
++  for (int i = 0; i < MAX_DEVICES; ++i)
++    HW::GBA::ExternalKeys(i).store(0);
++  {
++    std::lock_guard lock(s.m);
++    for (Slot& slot : s.slots)
++    {
++      slot.packed.clear();
++      slot.packed_seq = 0;
++    }
++  }
++  INFO_LOG_FMT(SERIALINTERFACE, "GBA web: stopped");
++}
++
++class WebHost final : public GBAHostInterface
++{
++public:
++  explicit WebHost(int device) : m_device(device)
++  {
++    State& s = S();
++    std::lock_guard life(s.lifecycle);
++    {
++      std::lock_guard lock(s.m);
++      s.slots[m_device] = Slot{};
++      s.slots[m_device].active = true;
++    }
++    ++s.refs;
++    if (s.server_wanted)
++      StartServer(s);
++  }
++
++  ~WebHost() override
++  {
++    State& s = S();
++    std::lock_guard life(s.lifecycle);
++    HW::GBA::ExternalKeys(m_device).store(0);
++    HW::GBA::FrontendKeys(m_device).store(0);
++    {
++      std::lock_guard lock(s.m);
++      s.slots[m_device].active = false;
++    }
++    if (--s.refs <= 0)
++    {
++      s.refs = 0;
++      StopServer(s);
++    }
++  }
++
++  void GameChanged() override {}
++
++  // Called on the GBA's own thread, once per finished frame.
++  void FrameEnded(std::span<const u32> video) override
++  {
++    State& s = S();
++    const long long now = NowMs();
++    if (video.empty() ||
++        (s.ports[m_device].viewers.load(std::memory_order_relaxed) == 0 &&
++         now - s.last_view_ms.load(std::memory_order_relaxed) > VIEWER_GRACE_MS))
++      return;
++    // The first frame after a pause (nobody watching) is published even if it equals the last
++    // one kept: that one may be from long ago, and a still screen would never send another.
++    // So is the first after a page connects (switching between / and /multi): it gets a fresh
++    // copy of a still screen, whatever it did with the kept one.
++    // (Both are asked: the flag is taken either way.)
++    const bool asked = s.ports[m_device].republish.exchange(false, std::memory_order_relaxed);
++    const bool resumed = now - m_last_converted_ms > 250 || asked;
++    m_last_converted_ms = now;
++
++    u16 width = 240;
++    u16 height = static_cast<u16>(std::min<std::size_t>(video.size() / 240, 0xFFFF));
++    if (video.size() == 160 * 144)
++    {
++      width = 160;
++      height = 144;
++    }
++
++    // Converted outside the lock. mGBA's pixels are 0x00BBGGRR with each channel's top five bits
++    // significant.
++    m_scratch.resize(std::size_t{width} * height);
++    const std::size_t n = std::min(m_scratch.size(), video.size());
++    for (std::size_t i = 0; i < n; ++i)
++    {
++      const u32 v = video[i];
++      m_scratch[i] = static_cast<u16>(((v >> 3) & 0x1F) | (((v >> 11) & 0x1F) << 5) |
++                                      (((v >> 19) & 0x1F) << 10));
++    }
++
++    {
++      std::lock_guard lock(s.m);
++      Slot& slot = s.slots[m_device];
++      // A picture that has not changed is not a new frame: still screens (most of the Tingle
++      // Tuner's) then cost the browser nothing.
++      if (!resumed && slot.width == width && slot.height == height && slot.pixels == m_scratch)
++        return;
++      slot.width = width;
++      slot.height = height;
++      slot.pixels.swap(m_scratch);
++      if (++slot.seq == 0)
++        slot.seq = 1;  // 0 is "nothing yet"
++    }
++    ++s.converted;
++    s.raw_ready.notify_one();
++  }
++
++private:
++  const int m_device;
++  std::vector<u16> m_scratch;         // the GBA thread's own
++  long long m_last_converted_ms = 0;  // the GBA thread's own
++};
++}  // namespace
++
++std::unique_ptr<GBAHostInterface> CreateHost(std::weak_ptr<HW::GBA::Core> core)
++{
++  const auto locked = core.lock();
++  if (!locked)
++    return nullptr;
++  const int device = locked->GetCoreInfo().device_number;
++  if (device < 0 || device >= MAX_DEVICES)  // the Game Boy Player's GBA has no screen to show
++    return nullptr;
++  return std::make_unique<WebHost>(device);
++}
++}  // namespace Libretro::GBAWeb
++
++// ---- For a frontend that knows this core ------------------------------------------------------
++// Looked up by name (dlsym); a frontend that does not know them is unaffected.
++// The buttons the frontend holds on the GBA in SI port `port` (0-3), as mGBA's key mask (A, B,
++// Select, Start, Right, Left, Up, Down, R, L = bits 0..9). Kept until the next call, OR-ed with
++// the page's. Call it once per frame, before retro_run.
++extern "C" __attribute__((visibility("default"))) void dolphin_gba_set_keys(unsigned port,
++                                                                            uint16_t mask)
++{
++  HW::GBA::FrontendOwnsInput().store(true, std::memory_order_relaxed);
++  if (port < Libretro::GBAWeb::MAX_DEVICES)
++    HW::GBA::FrontendKeys(static_cast<int>(port)).store(mask & 0x3FF);
++}
++
++// The GBA in SI port `port` (0-3) starts over, as Dolphin's own Reset does; the GameCube game goes
++// on. Taken at the GBA's next poll, on the CPU thread.
++extern "C" __attribute__((visibility("default"))) void dolphin_gba_reset(unsigned port)
++{
++  if (port < Libretro::GBAWeb::MAX_DEVICES)
++  {
++    HW::GBA::ResetRequest(static_cast<int>(port)).store(true);
++    INFO_LOG_FMT(SERIALINTERFACE, "GBA {}: reset asked for", port + 1);
++  }
++}
++
++// Asks the GBA in SI port `port` (0-3) to do what Dolphin's GBA window can (HW::GBA::Request:
++// 0 Connect, 1 Disconnect, 2 LoadRom, 3 LoadRomSavesHere, 4 ImportState, 5 ExportState,
++// 6 ImportSave, 7 ExportSave, 8 EReaderCard), with a file's path where it takes one. Done at the
++// GBA's next poll, on the CPU thread.
++extern "C" __attribute__((visibility("default"))) void dolphin_gba_request(unsigned port, int what,
++                                                                           const char* path)
++{
++  if (port >= Libretro::GBAWeb::MAX_DEVICES || what < 0 ||
++      what > static_cast<int>(HW::GBA::Request::EReaderCard))
++    return;
++  auto& requests = HW::GBA::RequestsFor(static_cast<int>(port));
++  std::lock_guard lock(requests.lock);
++  requests.queue.emplace_back(static_cast<HW::GBA::Request>(what), path ? path : "");
++  INFO_LOG_FMT(SERIALINTERFACE, "GBA {}: request {} {}", port + 1, what, path ? path : "");
++}
++
++// The page on port 6771: on (the default) or off, for a frontend with its own (or none). Takes
++// effect at once: off stops the server and drops its browsers; the GBA runs on.
++extern "C" __attribute__((visibility("default"))) void dolphin_gba_set_web_server(bool on)
++{
++  using namespace Libretro::GBAWeb;
++  State& s = S();
++  std::lock_guard life(s.lifecycle);
++  if (s.server_wanted == on)
++    return;
++  s.server_wanted = on;
++  if (on && s.refs > 0)
++    StartServer(s);
++  else if (!on)
++    StopServer(s);
++}
++
++// Copies the newest frame of the GBA in SI port `port` (0-3) when it is newer than *seq. Returns
++// false (nothing written) when the port holds no GBA or nothing is new. `pixels` takes
++// width*height u16 (at most 240*160; `capacity` is its size in pixels), the GBA's 15-bit colour:
++// bits 0-4 red, 5-9 green, 10-14 blue. Asking is what keeps the frames coming: the GBA thread
++// converts them only while someone asked in the last three seconds (or a browser watches).
++extern "C" __attribute__((visibility("default"))) bool
++dolphin_gba_get_frame(unsigned port, uint16_t* pixels, size_t capacity, unsigned* width,
++                      unsigned* height, unsigned* seq)
++{
++  using namespace Libretro::GBAWeb;
++  if (port >= MAX_DEVICES || !pixels || !width || !height || !seq)
++    return false;
++  State& s = S();
++  s.last_view_ms.store(NowMs(), std::memory_order_relaxed);
++  std::lock_guard lock(s.m);
++  const Slot& slot = s.slots[port];
++  if (!slot.active || slot.seq == *seq || slot.pixels.empty() || slot.pixels.size() > capacity)
++    return false;
++  std::copy(slot.pixels.begin(), slot.pixels.end(), pixels);
++  *width = slot.width;
++  *height = slot.height;
++  *seq = slot.seq;
++  return true;
++}
++
++#endif  // _WIN32
++
++#endif  // HAS_LIBMGBA
+diff --git a/Source/Core/DolphinLibretro/GBAWeb.h b/Source/Core/DolphinLibretro/GBAWeb.h
+new file mode 100644
+index 0000000..87720bf
+--- /dev/null
++++ b/Source/Core/DolphinLibretro/GBAWeb.h
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#ifdef HAS_LIBMGBA
++
++#include <memory>
++
++#include "Core/Host.h"
++
++namespace HW::GBA
++{
++class Core;
++}
++
++namespace Libretro::GBAWeb
++{
++// The host of one integrated GBA: its frames go to a page served on TCP port 6771 and the
++// page's buttons come back. The first host starts the server, the last one's destruction
++// stops it.
++std::unique_ptr<GBAHostInterface> CreateHost(std::weak_ptr<HW::GBA::Core> core);
++}  // namespace Libretro::GBAWeb
++
++#endif  // HAS_LIBMGBA
+diff --git a/Source/Core/DolphinLibretro/GBAWebSocket.cpp b/Source/Core/DolphinLibretro/GBAWebSocket.cpp
+new file mode 100644
+index 0000000..31d0893
+--- /dev/null
++++ b/Source/Core/DolphinLibretro/GBAWebSocket.cpp
+@@ -0,0 +1,180 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// PS5-ECAM: the remote touch screen's WebSockets (websocket.h), from dolphin78's prototype (#38).
++// Porpoise: PS5-ECAM's port/stream/websocket.cpp at 269e273, its handshake's SHA-1 from
++// ecam_sha1.h instead of OpenSSL (which Porpoise does not link); nothing else changed.
++// Dolphin libretro core: the same file as Porpoise carries it (GBAWeb.cpp's page server).
++#include "DolphinLibretro/GBAWebSocket.h"
++#include "DolphinLibretro/GBAWebSocketSha1.h"
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <poll.h>
++#include <fcntl.h>
++#include <cerrno>
++#include <cctype>
++#include <algorithm>
++
++namespace ps5stream
++{
++void ConfigureSocket(int fd)
++{
++	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
++	int yes = 1;
++	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
++#ifdef SO_NOSIGPIPE
++	setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
++#endif
++}
++
++bool SendBytes(int fd, const void* bytes, size_t size, const std::function<bool()>& alive)
++{
++	const auto* p = static_cast<const uint8_t*>(bytes);
++	const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
++	while (size && alive() && std::chrono::steady_clock::now() < deadline)
++	{
++		int flags = 0;
++#ifdef MSG_NOSIGNAL
++		flags = MSG_NOSIGNAL;
++#endif
++		const auto n = send(fd, p, size, flags);
++		if (n > 0) { p += n; size -= n; continue; }
++		if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
++			return false;
++		pollfd wait{fd, POLLOUT, 0};
++		poll(&wait, 1, 20);
++	}
++	return size == 0;
++}
++
++namespace
++{
++std::string Header(const std::string& request, const std::string& name)
++{
++	size_t start = request.find("\r\n");
++	while (start != std::string::npos)
++	{
++		start += 2;
++		const auto end = request.find("\r\n", start);
++		if (end == std::string::npos || end == start) break;
++		const auto colon = request.find(':', start);
++		if (colon < end)
++		{
++			std::string field = request.substr(start, colon - start);
++			for (auto& c : field) c = std::tolower(static_cast<unsigned char>(c));
++			if (field == name)
++			{
++				auto value = request.substr(colon + 1, end - colon - 1);
++				const auto first = value.find_first_not_of(" \t"), last = value.find_last_not_of(" \t");
++				return first == std::string::npos ? "" : value.substr(first, last - first + 1);
++			}
++		}
++		start = end;
++	}
++	return {};
++}
++}
++
++bool WebSocket::Upgrade(const std::string& request)
++{
++	std::string upgrade = Header(request, "upgrade"), connection = Header(request, "connection");
++	for (auto& c : upgrade) c = std::tolower(static_cast<unsigned char>(c));
++	for (auto& c : connection) c = std::tolower(static_cast<unsigned char>(c));
++	const auto key = Header(request, "sec-websocket-key");
++	// Sec-WebSocket-Key is protocol framing, not an authentication requirement.
++	if (upgrade != "websocket" || connection.find("upgrade") == std::string::npos ||
++		Header(request, "sec-websocket-version") != "13" || key.size() != 24)
++		return false;
++	const std::string challenge = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
++	unsigned char digest[20];
++	Sha1(challenge.data(), challenge.size(), digest);
++	unsigned char encoded[64];
++	const int length = Base64(digest, sizeof digest, encoded);
++	const std::string reply = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
++		"Connection: Upgrade\r\nSec-WebSocket-Accept: " + std::string(reinterpret_cast<char*>(encoded), length) + "\r\n\r\n";
++	const auto end = request.find("\r\n\r\n");
++	if (end != std::string::npos)
++		input.assign(request.begin() + end + 4, request.end());
++	return SendBytes(fd, reply.data(), reply.size(), alive);
++}
++
++bool WebSocket::Send(uint8_t opcode, const void* bytes, size_t size)
++{
++	uint8_t header[10]{static_cast<uint8_t>(0x80 | opcode), 0};
++	size_t headerSize = 2;
++	if (size < 126) header[1] = static_cast<uint8_t>(size);
++	else if (size <= 65535)
++	{
++		header[1] = 126; header[2] = size >> 8; header[3] = size; headerSize = 4;
++	}
++	else
++	{
++		header[1] = 127;
++		for (int i = 0; i < 8; ++i) header[2 + i] = static_cast<uint64_t>(size) >> (56 - i * 8);
++		headerSize = 10;
++	}
++	return SendBytes(fd, header, headerSize, alive) && SendBytes(fd, bytes, size, alive);
++}
++
++WebSocket::Result WebSocket::Receive(std::string& message, int timeoutMs)
++{
++	const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
++	for (;;)
++	{
++		if (input.size() >= 2)
++		{
++			const uint8_t opcode = input[0] & 15;
++			const bool fin = input[0] & 128;
++			if ((input[0] & 112) || !(input[1] & 128) ||
++				(opcode != 0 && opcode != 1 && opcode != 2 && opcode != 8 && opcode != 9 && opcode != 10))
++				return Result::Error;
++			uint64_t length = input[1] & 127;
++			size_t offset = 2;
++			if (length == 126)
++			{
++				if (input.size() < 4) goto read;
++				length = (input[2] << 8) | input[3]; offset = 4;
++				if (length < 126) return Result::Error;
++			}
++			else if (length == 127) return Result::Error; // Commands never require 64-bit lengths.
++			if (length > 512 || (opcode >= 8 && (!fin || length > 125)) || (opcode == 8 && length == 1)) return Result::Error;
++			if (input.size() >= offset + 4 + length)
++			{
++				message.resize(length);
++				for (size_t i = 0; i < length; ++i) message[i] = input[offset + 4 + i] ^ input[offset + i % 4];
++				input.erase(input.begin(), input.begin() + offset + 4 + length);
++				if (opcode == 8) { Send(8, message.data(), message.size()); return Result::Closed; }
++				if (opcode == 9) { if (!Send(10, message.data(), message.size())) return Result::Error; continue; }
++				if (opcode == 10) continue;
++				if (opcode == 0)
++				{
++					if (!fragmentOpcode || fragmented.size() + message.size() > 512) return Result::Error;
++					fragmented.insert(fragmented.end(), message.begin(), message.end());
++					if (!fin) continue;
++					message.assign(fragmented.begin(), fragmented.end()); fragmented.clear();
++					const auto result = fragmentOpcode == 1 ? Result::Text : Result::Binary;
++					fragmentOpcode = 0; return result;
++				}
++				if (fragmentOpcode) return Result::Error;
++				if (!fin) { fragmentOpcode = opcode; fragmented.assign(message.begin(), message.end()); continue; }
++				return opcode == 1 ? Result::Text : Result::Binary;
++			}
++		}
++	read:
++		if (!alive()) return Result::Closed;
++		if (std::chrono::steady_clock::now() >= deadline) return Result::Idle;
++		pollfd wait{fd, POLLIN, 0};
++		const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
++		if (poll(&wait, 1, std::max(1, std::min(20, int(remaining)))) <= 0) continue;
++		uint8_t bytes[1024];
++		const auto n = recv(fd, bytes, sizeof(bytes), 0);
++		if (n == 0) return Result::Closed;
++		if (n < 0)
++		{
++			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
++			return Result::Error;
++		}
++		if (input.size() + n > 2048) return Result::Error;
++		input.insert(input.end(), bytes, bytes + n);
++	}
++}
++}
+diff --git a/Source/Core/DolphinLibretro/GBAWebSocket.h b/Source/Core/DolphinLibretro/GBAWebSocket.h
+new file mode 100644
+index 0000000..ab640f6
+--- /dev/null
++++ b/Source/Core/DolphinLibretro/GBAWebSocket.h
+@@ -0,0 +1,30 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// PS5-ECAM: the remote touch screen's WebSockets (stream.h), from dolphin78's prototype (#38).
++#pragma once
++#include <chrono>
++#include <cstdint>
++#include <functional>
++#include <string>
++#include <vector>
++
++namespace ps5stream
++{
++// Small RFC 6455 transport for the two local streaming endpoints. Client messages
++// are capped at 512 bytes; server messages carry a single JPEG or a control frame.
++class WebSocket
++{
++public:
++	enum class Result { Idle, Text, Binary, Closed, Error };
++	WebSocket(int socket, const std::function<bool()>& alive) : fd(socket), alive(alive) {}
++	bool Upgrade(const std::string& request);
++	bool Send(uint8_t opcode, const void* bytes, size_t size);
++	Result Receive(std::string& message, int timeoutMs);
++private:
++	int fd;
++	std::function<bool()> alive;
++	std::vector<uint8_t> input, fragmented;
++	uint8_t fragmentOpcode = 0;
++};
++bool SendBytes(int fd, const void* bytes, size_t size, const std::function<bool()>& alive);
++void ConfigureSocket(int fd);
++}
+diff --git a/Source/Core/DolphinLibretro/GBAWebSocketSha1.h b/Source/Core/DolphinLibretro/GBAWebSocketSha1.h
+new file mode 100644
+index 0000000..b10288c
+--- /dev/null
++++ b/Source/Core/DolphinLibretro/GBAWebSocketSha1.h
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Porpoise: SHA-1 and Base64 for the WebSocket handshake (ecam_websocket.cpp), in place of OpenSSL.
++// Only the handshake's digest: not for anything that needs to be secure.
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++
++namespace ps5stream
++{
++inline void Sha1(const void* data, size_t size, unsigned char out[20])
++{
++	uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
++	auto rol = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
++	auto block = [&](const unsigned char* b) {
++		uint32_t w[80];
++		for (int i = 0; i < 16; ++i)
++			w[i] = uint32_t(b[i * 4]) << 24 | uint32_t(b[i * 4 + 1]) << 16 | uint32_t(b[i * 4 + 2]) << 8 | b[i * 4 + 3];
++		for (int i = 16; i < 80; ++i)
++			w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
++		uint32_t a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4];
++		for (int i = 0; i < 80; ++i)
++		{
++			uint32_t f, k;
++			if (i < 20) { f = (bb & c) | (~bb & d); k = 0x5A827999u; }
++			else if (i < 40) { f = bb ^ c ^ d; k = 0x6ED9EBA1u; }
++			else if (i < 60) { f = (bb & c) | (bb & d) | (c & d); k = 0x8F1BBCDCu; }
++			else { f = bb ^ c ^ d; k = 0xCA62C1D6u; }
++			const uint32_t t = rol(a, 5) + f + e + k + w[i];
++			e = d; d = c; c = rol(bb, 30); bb = a; a = t;
++		}
++		h[0] += a; h[1] += bb; h[2] += c; h[3] += d; h[4] += e;
++	};
++	const auto* p = static_cast<const unsigned char*>(data);
++	size_t left = size;
++	for (; left >= 64; left -= 64, p += 64)
++		block(p);
++	unsigned char tail[128] = {};
++	std::memcpy(tail, p, left);
++	tail[left] = 0x80;
++	const size_t tail_size = left < 56 ? 64 : 128;
++	const uint64_t bits = uint64_t(size) * 8;
++	for (int i = 0; i < 8; ++i)
++		tail[tail_size - 1 - i] = static_cast<unsigned char>(bits >> (8 * i));
++	block(tail);
++	if (tail_size == 128)
++		block(tail + 64);
++	for (int i = 0; i < 5; ++i)
++		for (int j = 0; j < 4; ++j)
++			out[i * 4 + j] = static_cast<unsigned char>(h[i] >> (24 - 8 * j));
++}
++
++// Returns the length written (no terminator).
++inline int Base64(const unsigned char* in, size_t size, unsigned char* out)
++{
++	static const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++	int o = 0;
++	for (size_t i = 0; i < size; i += 3)
++	{
++		const uint32_t v = uint32_t(in[i]) << 16 | (i + 1 < size ? uint32_t(in[i + 1]) << 8 : 0) |
++						   (i + 2 < size ? in[i + 2] : 0);
++		out[o++] = kAlphabet[(v >> 18) & 63];
++		out[o++] = kAlphabet[(v >> 12) & 63];
++		out[o++] = i + 1 < size ? kAlphabet[(v >> 6) & 63] : '=';
++		out[o++] = i + 2 < size ? kAlphabet[v & 63] : '=';
++	}
++	return o;
++}
++}
+diff --git a/Source/Core/DolphinLibretro/Host.cpp b/Source/Core/DolphinLibretro/Host.cpp
+index 56b35c4..b89533d 100644
+--- a/Source/Core/DolphinLibretro/Host.cpp
++++ b/Source/Core/DolphinLibretro/Host.cpp
+@@ -14,6 +14,9 @@
+ #include "Common/Logging/Log.h"
+ #include "Core/ConfigManager.h"
+ #include "Core/Host.h"
++#ifdef HAS_LIBMGBA
++#include "GBAWeb.h"
++#endif
+ 
+ std::vector<std::string> Host_GetPreferredLocales()
+ {
+@@ -26,9 +29,16 @@ void Host_JitCacheInvalidation() {}
+ void Host_JitProfileDataWiped() {}
+ bool Host_TASInputHasFocus() { return false; }
+ 
+-std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core>)
++// The integrated GBA's screen and buttons are a web page (GBAWeb.cpp); without libmgba there is
++// no GBA to host.
++std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core> core)
+ {
++#ifdef HAS_LIBMGBA
++    return Libretro::GBAWeb::CreateHost(std::move(core));
++#else
++    (void)core;
+     return nullptr;
++#endif
+ }
+ 
+ void Host_Message(HostMessageID id)
