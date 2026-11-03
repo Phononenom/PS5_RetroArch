@@ -43,7 +43,7 @@ namespace Libretro { namespace Options {
     const char* FILTER[4]={"fi1","fi2","fi3","fi4"}; const char* BLEND[4]={"bl1","bl2","bl3","bl4"};
     const char* VOLUME[4]={"vo1","vo2","vo3","vo4"}; const char* SPEAKER[4]={"sp1","sp2","sp3","sp4"}; const char* SMOOTH[4]={"sm1","sm2","sm3","sm4"};
     // The buttons in Options.h's order (tools/pr-steps keeps the ones a step has).
-    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l"};
+    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","show"};
     constexpr int BUTTON_COUNT=sizeof(names)/sizeof(names[0]);
     static std::string keys[4][BUTTON_COUNT];
     static const char* BUTTON[4][BUTTON_COUNT];
@@ -161,6 +161,21 @@ int main(){
   CHECK(keys(1)==0 && gc(0,RETRO_DEVICE_ID_JOYPAD_L3)==1, "a frontend maps the GBA itself: the core reads nothing");
   HW::GBA::FrontendOwnsInput().store(false);
 
+  { using Libretro::GBAScreen::windows;
+    defaults(); opt[gba::CONTROL[1]]="p1"; opt[B(0,"show")]="r3";
+    clear(); UpdateGBAInput();
+    CHECK(!windows[1].shown, "screen: hidden");
+    down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput();
+    CHECK(windows[1].shown, "Show Screen held (with the modifier): shown");
+    down[0][RETRO_DEVICE_ID_JOYPAD_R3]=false; UpdateGBAInput();
+    CHECK(!windows[1].shown, "Show Screen let go (Hold): hidden");
+    opt[gba::SHOW_MODE[0]]="toggle"; down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput(); down[0][RETRO_DEVICE_ID_JOYPAD_R3]=false; UpdateGBAInput();
+    CHECK(windows[1].shown, "Toggle: a press shows it");
+    down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput(); down[0][RETRO_DEVICE_ID_JOYPAD_R3]=false; UpdateGBAInput();
+    CHECK(!windows[1].shown, "Toggle: the next hides it");
+    opt[gba::SCREEN[1]]="on"; UpdateGBAInput(); CHECK(windows[1].shown, "Screen On: shown with nothing held");
+    opt[gba::SCREEN[1]]="off"; down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_R3]=true; UpdateGBAInput(); CHECK(!windows[1].shown, "Screen Off: never");
+    defaults(); }
   input_types[1]=RETRO_DEVICE_JOYPAD; clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; UpdateGBAInput();
   CHECK(visible==0 && keys(1)==0 && gc(0,RETRO_DEVICE_ID_JOYPAD_L3)==1, "GBA port removed: options hidden, keys cleared, masks off");
   CHECK(logged("GBA: options {}") == 3, "the options shown / hidden is logged on a change only (hidden, shown, hidden)");
