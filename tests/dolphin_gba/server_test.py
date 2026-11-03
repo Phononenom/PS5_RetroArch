@@ -132,6 +132,9 @@ check('closing the page lets go of its keys', out[-1] == 'KEYS 1 000' or wait_fo
 i = WS('/input?p=2')
 i.send_text('reset')
 check('Reset GBA from the page asks the GBA to start over', wait_for(out, 'RESET 1'))
+i.send_text('disconnect'); i.send_text('disconnect')
+check('Disconnect GBA toggles the link cable: out, then in', wait_for(out, 'REQUEST 1 1') and wait_for(out, 'REQUEST 1 0'), [l for l in out if l.startswith('REQUEST')])
+check('the link cable from the page is logged at Info', wait_for(err, 'I: GBA 2: link cable out from the page') and wait_for(err, 'I: GBA 2: link cable in from the page'))
 check('the page\'s buttons are logged at Info', wait_for(err, 'I: GBA 2: Reset from the page'))
 i.close()
 

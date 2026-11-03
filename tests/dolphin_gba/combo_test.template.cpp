@@ -43,7 +43,7 @@ namespace Libretro { namespace Options {
     const char* FILTER[4]={"fi1","fi2","fi3","fi4"}; const char* BLEND[4]={"bl1","bl2","bl3","bl4"};
     const char* VOLUME[4]={"vo1","vo2","vo3","vo4"}; const char* SPEAKER[4]={"sp1","sp2","sp3","sp4"}; const char* SMOOTH[4]={"sm1","sm2","sm3","sm4"};
     // The buttons in Options.h's order (tools/pr-steps keeps the ones a step has).
-    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","show","move","opacity"};
+    static const char* const names[]={"a","b","select","start","right","left","up","down","r","l","reset","link","show","move","opacity"};
     constexpr int BUTTON_COUNT=sizeof(names)/sizeof(names[0]);
     static std::string keys[4][BUTTON_COUNT];
     static const char* BUTTON[4][BUTTON_COUNT];
@@ -154,6 +154,15 @@ int main(){
   input_types[2]=RETRO_DEVICE_GBA_EMU; opt[gba::CONTROL[1]]="p1"; opt[gba::CONTROL[2]]="p1"; clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_B]=true; UpdateGBAInput();
   CHECK(keys(1)==0x02 && keys(2)==0x02, "player 1 plays two GBAs: both get B");
 
+  opt[B(0,"link")]="x"; calls.clear(); clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; down[0][RETRO_DEVICE_ID_JOYPAD_X]=true; UpdateGBAInput(); UpdateGBAInput();
+  CHECK(calls.size()==2 && calls[0]=="link1" && calls[1]=="link2", "Link Cable: once per press, to each GBA the player plays");
+  calls.clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=false; down[0][RETRO_DEVICE_ID_JOYPAD_X]=false; UpdateGBAInput(); down[0][RETRO_DEVICE_ID_JOYPAD_X]=true; UpdateGBAInput();
+  CHECK(calls.empty(), "actions need the modifier");
+  opt[B(0,"link")]="none";
+  opt[B(0,"reset")]="r"; opt[B(0,"r")]="none"; clear(); down[0][RETRO_DEVICE_ID_JOYPAD_L3]=true; UpdateGBAInput(); down[0][RETRO_DEVICE_ID_JOYPAD_R]=true; UpdateGBAInput();
+  CHECK(HW::GBA::ResetRequest(1).exchange(false) && HW::GBA::ResetRequest(2).exchange(false), "Reset asks both GBAs to start over");
+  CHECK(logged("Reset from player {}") == 2, "a controller Reset is logged, once per GBA");
+  opt[B(0,"reset")]="none"; opt[B(0,"r")]="r";
   CHECK(logged("played by player {}{}") >= 1 && logged("played by player {}{}") <= 4, "who plays each GBA is logged on a change, not every frame");
   input_types[2]=RETRO_DEVICE_JOYPAD; defaults();
 
