@@ -74,6 +74,21 @@ class DolphinGba(unittest.TestCase):
         """Every test picture arrives at the browser unchanged."""
         self.run_script('codec_test.py')
 
+    def test_controller_buttons(self):
+        """The controllers' GBA buttons: Input.cpp's GBA block, lifted into a program with a scripted
+        controller and fake core options (combo_test.template.cpp)."""
+        src = (self.core / 'DolphinLibretro/Input.cpp').read_text()
+        start = src.index("// ---- GBA (Integrated): the controllers' GBA buttons")
+        end = src.index('\n}\n', src.index('static void UpdateGBAInput()')) + 3
+        program = self.work / 'combo_test.cpp'
+        program.write_text((HERE / 'combo_test.template.cpp').read_text().replace('//@@BLOCK@@', src[start:end]))
+        binary = self.work / 'combo_test'
+        subprocess.run(['c++', '-std=c++20', '-Wall', '-Wextra', '-Wno-unused-parameter',
+                        '-Wno-missing-field-initializers', f'-I{HERE / "stubs"}', f'-I{self.core}',
+                        str(program), '-o', str(binary)], check=True)
+        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()
